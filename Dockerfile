@@ -21,7 +21,7 @@ RUN ./build/install_rust.sh
 RUN PREFIX=/ ./build/install_llvm.sh
 RUN ./build/install_tools.sh
 RUN ./build/build.sh
-RUN ./build/install_pin_mode.sh
+# RUN ./build/install_pin_mode.sh
 
 VOLUME ["/data"]
 WORKDIR /data
