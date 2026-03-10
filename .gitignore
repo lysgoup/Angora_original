@@ -23,3 +23,4 @@ llvm_mode/build/
 *.ll
 *.s
 *.asan
+_*
