@@ -79,7 +79,7 @@ pub fn fuzz_main(
         panic!();
     }
 
-    info!("Dry-run completed. Exiting for testing.");
+    info!("Dry-run completed. Total inputs executed: {}", executor.local_stats.num_exec);
 
     // Create dryrun_finish marker file in inputs directory
     let dryrun_finish_path = depot.dirs.inputs_dir.join("dryrun_finish");
