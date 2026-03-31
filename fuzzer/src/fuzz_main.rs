@@ -125,6 +125,9 @@ pub fn fuzz_main(
         }
     }
 
+    let parent_map_path = angora_out_dir.join("parent_map.txt");
+    depot.write_parent_map(&parent_map_path);
+
     match fs::remove_file(&fuzzer_stats) {
         Ok(_) => (),
         Err(e) => warn!("Could not remove fuzzer stats file: {:?}", e),
