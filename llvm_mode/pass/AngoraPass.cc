@@ -78,6 +78,9 @@ public:
   bool output_cond_loc;
   int num_fn_ctx;
 
+  //cmpid 로그 파일
+  std::ofstream cmpid_log_file;
+
   MDNode *ColdCallWeights;
 
   // Types
@@ -114,7 +117,7 @@ public:
 
   AngoraLLVMPass() : ModulePass(ID) {}
   bool runOnModule(Module &M) override;
-  u32 getInstructionId(Instruction *Inst);
+  u32 getInstructionId(Instruction *Inst, const char *InstType);
   u32 getRandomBasicBlockId();
   bool skipBasicBlock();
   u32 getRandomNum();
@@ -165,18 +168,29 @@ u32 AngoraLLVMPass::getRandomContextId() {
 
 u32 AngoraLLVMPass::getRandomInstructionId() { return getRandomNum(); }
 
-u32 AngoraLLVMPass::getInstructionId(Instruction *Inst) {
+u32 AngoraLLVMPass::getInstructionId(Instruction *Inst, const char *InstType) {
   u32 h = 0;
+  std::string filename = "unknown";
+  u32 Line = 0;
+  u32 Col = 0;
+  bool has_debug_info = false;
+
+  // ✨ 먼저 디버그 정보가 있는지 확인 (랜덤 모드와 무관)
+  DILocation *Loc = Inst->getDebugLoc();
+  if (Loc) {
+    filename = cast<DIScope>(Loc->getScope())->getFilename().str();
+    Line = Loc->getLine();
+    Col = Loc->getColumn();
+    has_debug_info = true;
+  }
+
   if (is_bc) {
     h = ++CidCounter;
   } else {
     if (gen_id_random) {
       h = getRandomInstructionId();
     } else {
-      DILocation *Loc = Inst->getDebugLoc();
-      if (Loc) {
-        u32 Line = Loc->getLine();
-        u32 Col = Loc->getColumn();
+      if (has_debug_info) {
         h = (Col * 33 + Line) * 33 + ModId;
       } else {
         h = getRandomInstructionId();
@@ -187,6 +201,17 @@ u32 AngoraLLVMPass::getInstructionId(Instruction *Inst) {
       h = h * 3 + 1;
     }
     UniqCidSet.insert(h);
+  }
+
+  // ✨ 로그 기록 - 모든 경우에 대해
+  if (cmpid_log_file.is_open()) {
+      if (has_debug_info) {
+          cmpid_log_file << h << ": " << filename << ", " << Line << ", "
+                        << Col << ", [" << InstType << "]\n";
+      } else {
+          cmpid_log_file << h << ": [no-debug-info], 0, 0, [" << InstType << "]\n";
+      }
+      cmpid_log_file.flush();
   }
 
   if (output_cond_loc) {
@@ -516,7 +541,7 @@ void AngoraLLVMPass::visitCompareFunc(Instruction *Inst) {
   if (!isa<CallInst>(Inst) || !ExploitList.isIn(*Inst, CompareFuncCat)) {
     return;
   }
-  ConstantInt *Cid = ConstantInt::get(Int32Ty, getInstructionId(Inst));
+  ConstantInt *Cid = ConstantInt::get(Int32Ty, getInstructionId(Inst, "CmpFn"));
 
   if (!TrackMode)
     return;
@@ -689,7 +714,7 @@ void AngoraLLVMPass::visitCmpInst(Instruction *Inst) {
   Instruction *InsertPoint = Inst->getNextNode();
   if (!InsertPoint || isa<ConstantInt>(Inst))
     return;
-  Constant *Cid = ConstantInt::get(Int32Ty, getInstructionId(Inst));
+  Constant *Cid = ConstantInt::get(Int32Ty, getInstructionId(Inst, "ICmp"));
   processCmp(Inst, Cid, InsertPoint);
 }
 
@@ -700,7 +725,7 @@ void AngoraLLVMPass::visitBranchInst(Instruction *Inst) {
     if (Cond && Cond->getType()->isIntegerTy() && !isa<ConstantInt>(Cond)) {
       if (!isa<CmpInst>(Cond)) {
         // From  and, or, call, phi ....
-        Constant *Cid = ConstantInt::get(Int32Ty, getInstructionId(Inst));
+        Constant *Cid = ConstantInt::get(Int32Ty, getInstructionId(Inst, "Branch"));
         processBoolCmp(Cond, Cid, Inst);
       }
     }
@@ -721,7 +746,7 @@ void AngoraLLVMPass::visitSwitchInst(Module &M, Instruction *Inst) {
   if (num_bytes == 0 || num_bits % 8 > 0)
     return;
 
-  Constant *Cid = ConstantInt::get(Int32Ty, getInstructionId(Inst));
+  Constant *Cid = ConstantInt::get(Int32Ty, getInstructionId(Inst, "Switch"));
   IRBuilder<> IRB(Sw);
 
   if (FastMode) {
@@ -792,7 +817,7 @@ void AngoraLLVMPass::visitExploitation(Instruction *Inst) {
       Type *ParamType = ParamVal->getType();
       if (ParamType->isIntegerTy() || ParamType->isPointerTy()) {
         if (!isa<ConstantInt>(ParamVal)) {
-          ConstantInt *Cid = ConstantInt::get(Int32Ty, getInstructionId(Inst));
+          ConstantInt *Cid = ConstantInt::get(Int32Ty, getInstructionId(Inst, Instruction::getOpcodeName(Inst->getOpcode())));
           int size = ParamVal->getType()->getScalarSizeInBits() / 8;
           if (ParamType->isPointerTy()) {
             size = 8;
@@ -830,6 +855,28 @@ bool AngoraLLVMPass::runOnModule(Module &M) {
   }
 
   initVariables(M);
+
+  // ✨ 추가: cmpid_log.txt 파일 열기 (로그 디렉토리 환경변수 지원)
+  std::string log_dir = "/angora";  // 기본값
+  const char *env_log_dir = getenv("ANGORA_PASS_LOG_DIR");
+  if (env_log_dir) {
+    log_dir = std::string(env_log_dir);
+  }
+  std::string log_path;
+  if (TrackMode) {
+    log_path = log_dir + "/cmpid_track.txt";
+  } else {
+    log_path = log_dir + "/cmpid_fast.txt";
+  }
+
+  cmpid_log_file.open(log_path, std::ios::out | std::ios::app);
+  if (cmpid_log_file.is_open()) {
+    cmpid_log_file << "# Module: " << ModName << " (ModId: " << ModId << ")\n";
+    cmpid_log_file << "# Format: cmpid: filename, line, column\n";
+    OKF("cmpid_log.txt opened at: %s", log_path.c_str());
+  } else {
+    errs() << "Warning: Could not open cmpid_log.txt at " << log_path << "\n";
+  }
 
   if (DFSanMode)
     return true;
@@ -879,6 +926,13 @@ bool AngoraLLVMPass::runOnModule(Module &M) {
 
   if (is_bc)
     OKF("Max constraint id is %d", CidCounter);
+
+  // ✨ 추가: 파일 닫기
+  if (cmpid_log_file.is_open()) {
+    cmpid_log_file.close();
+    OKF("cmpid_log.txt closed, total unique IDs: %zu", UniqCidSet.size());
+  }
+
   return true;
 }
 
