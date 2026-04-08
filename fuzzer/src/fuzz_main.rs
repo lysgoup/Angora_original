@@ -82,13 +82,13 @@ pub fn fuzz_main(
     info!("Dry-run completed. Total inputs executed: {}", executor.local_stats.num_exec);
 
     // Create dryrun_finish marker file in inputs directory
-    let dryrun_finish_path = depot.dirs.inputs_dir.join("dryrun_finish");
-    match fs::File::create(&dryrun_finish_path) {
-        Ok(_) => info!("Created dryrun_finish marker at {:?}", dryrun_finish_path),
-        Err(e) => warn!("Could not create dryrun_finish marker: {:?}", e),
-    }
+    // let dryrun_finish_path = depot.dirs.inputs_dir.join("dryrun_finish");
+    // match fs::File::create(&dryrun_finish_path) {
+    //     Ok(_) => info!("Created dryrun_finish marker at {:?}", dryrun_finish_path),
+    //     Err(e) => warn!("Could not create dryrun_finish marker: {:?}", e),
+    // }
 
-    // return;
+    return;
 
     let (handles, child_count) = init_cpus_and_run_fuzzing_threads(
         bind,

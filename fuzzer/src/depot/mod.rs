@@ -3,6 +3,7 @@ mod depot_dir;
 mod dump;
 mod file;
 mod qpriority;
+mod queue_restorer;
 mod sync;
 
 pub use self::{depot::{Depot, NO_PARENT}, file::*, sync::*};
