@@ -5,6 +5,8 @@ use crate::{
     cond_stmt::{self, NextState},
     depot, stats, track,
 };
+#[cfg(feature = "storfuzz")]
+use crate::data_cov;
 use angora_common::{config, defs};
 
 use std::{
@@ -22,6 +24,8 @@ use wait_timeout::ChildExt;
 pub struct Executor {
     pub cmd: command::CommandOpt,
     pub branches: branches::Branches,
+    #[cfg(feature = "storfuzz")]
+    pub data_cov: data_cov::DataCov,
     pub t_conds: cond_stmt::ShmConds,
     envs: HashMap<String, String>,
     forksrv: Option<Forksrv>,
@@ -45,6 +49,8 @@ impl Executor {
     ) -> Self {
         // ** Share Memory **
         let branches = branches::Branches::new(global_branches);
+        #[cfg(feature = "storfuzz")]
+        let data_cov = data_cov::DataCov::new();
         let t_conds = cond_stmt::ShmConds::new();
 
         // ** Envs **
@@ -69,6 +75,14 @@ impl Executor {
             defs::LD_LIBRARY_PATH_VAR.to_string(),
             cmd.ld_library.clone(),
         );
+        // Pass data-coverage shmem id to child processes.
+        // Must be in envs (not env::set_var) because children are spawned with
+        // env_clear().envs(&envs) — same pattern as BRANCHES_SHM_ENV_VAR.
+        #[cfg(feature = "storfuzz")]
+        envs.insert(
+            defs::DATA_SHM_ENV_VAR.to_string(),
+            data_cov.get_id().to_string(),
+        );
 
         let fd = pipe_fd::PipeFd::new(&cmd.out_file);
         let forksrv = Some(forksrv::Forksrv::new(
@@ -85,6 +99,8 @@ impl Executor {
         Self {
             cmd,
             branches,
+            #[cfg(feature = "storfuzz")]
+            data_cov,
             t_conds,
             envs,
             forksrv,
@@ -200,6 +216,8 @@ impl Executor {
     fn try_unlimited_memory(&mut self, buf: &Vec<u8>, cmpid: u32) -> bool {
         let mut skip = false;
         self.branches.clear_trace();
+        #[cfg(feature = "storfuzz")]
+        self.data_cov.clear_run_map();
         if self.cmd.is_stdin {
             self.fd.rewind();
         }
@@ -227,7 +245,23 @@ impl Executor {
         // new edge: one byte in bitmap
         let (has_new_path, has_new_edge, edge_num) = self.branches.has_new(status);
 
-        if has_new_path || self.is_dry_run {
+        #[cfg(feature = "storfuzz")]
+        let data_new = self.data_cov.has_new();
+        #[cfg(not(feature = "storfuzz"))]
+        let data_new = false;
+
+        if has_new_path || data_new || self.is_dry_run {
+            #[cfg(feature = "storfuzz")]
+            info!(
+                "[SAVE] status={:?} branch_new={} has_new_edge={} data_new={} edge_num={}",
+                status, has_new_path, has_new_edge, data_new, edge_num
+            );
+            #[cfg(not(feature = "storfuzz"))]
+            info!(
+                "[SAVE] status={:?} branch_new={} has_new_edge={} edge_num={}",
+                status, has_new_path, has_new_edge, edge_num
+            );
+
             self.has_new_path = true;
             self.local_stats.find_new(&status);
             let id = self.depot.save(status, &buf, cmpid);
@@ -318,6 +352,8 @@ impl Executor {
         self.write_test(buf);
 
         self.branches.clear_trace();
+        #[cfg(feature = "storfuzz")]
+        self.data_cov.clear_run_map();
 
         compiler_fence(Ordering::SeqCst);
         let ret_status = if let Some(ref mut fs) = self.forksrv {
@@ -449,10 +485,11 @@ impl Executor {
     }
 
     pub fn update_log(&mut self) {
-        self.global_stats
-            .write()
-            .unwrap()
-            .sync_from_local(&mut self.local_stats);
+        let mut gs = self.global_stats.write().unwrap();
+        gs.sync_from_local(&mut self.local_stats);
+        #[cfg(feature = "storfuzz")]
+        gs.set_data_bits(self.data_cov.bits_set());
+        drop(gs);
 
         self.t_conds.clear();
         self.tmout_cnt = 0;

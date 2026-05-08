@@ -9,6 +9,9 @@ pub struct ChartStats {
     init_time: TimeIns,
     track_time: TimeDuration,
     density: Average,
+    unique_branches: Counter,
+    #[cfg(feature = "storfuzz")]
+    data_bits_set: Counter,
 
     num_rounds: Counter,
     max_rounds: Counter,
@@ -89,6 +92,7 @@ impl ChartStats {
 
     fn sync_from_branches(&mut self, gb: &Arc<GlobalBranches>) {
         self.density = Average::new(gb.get_density(), 0);
+        self.unique_branches = gb.get_unique_count().into();
     }
 
     fn get_speed(&mut self) {
@@ -121,6 +125,11 @@ impl ChartStats {
             .num_conds
             .into()
     }
+
+    #[cfg(feature = "storfuzz")]
+    pub fn set_data_bits(&mut self, n: usize) {
+        self.data_bits_set = n.into();
+    }
 }
 
 impl fmt::Display for ChartStats {
@@ -138,15 +147,20 @@ impl fmt::Display for ChartStats {
             warn!("Find small number constraints, please make sure you have modeled the read functions.")
         }
 
+        #[cfg(feature = "storfuzz")]
+        let data_line = format!("  DATACOV  | DATA_BITS: {}\n", self.data_bits_set);
+        #[cfg(not(feature = "storfuzz"))]
+        let data_line = String::new();
+
         write!(
             f,
             r#"
 {}
 {}
     TIMING |     RUN: {},   TRACK: {}
-  COVERAGE |    EDGE: {},   DENSITY: {}%
-    EXECS  |   TOTAL: {},     ROUND: {},     MAX_R: {}
-    SPEED  |  PERIOD: {:6}r/s    TIME: {}us, 
+  COVERAGE |    EDGE: {},   DENSITY: {}%,  UNIQUE_BR: {}
+{}    EXECS  |   TOTAL: {},     ROUND: {},     MAX_R: {}
+    SPEED  |  PERIOD: {:6}r/s    TIME: {}us,
     FOUND  |    PATH: {},     HANGS: {},   CRASHES: {}
 {}
 {}
@@ -162,6 +176,8 @@ impl fmt::Display for ChartStats {
             self.track_time,
             self.avg_edge_num,
             self.density,
+            self.unique_branches,
+            data_line,
             self.num_exec,
             self.num_rounds,
             self.max_rounds,

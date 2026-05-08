@@ -65,6 +65,10 @@ impl GlobalBranches {
         let d = self.density.load(Ordering::Relaxed);
         (d * 10000 / BRANCHES_SIZE) as f32 / 100.0
     }
+
+    pub fn get_unique_count(&self) -> usize {
+        self.density.load(Ordering::Relaxed)
+    }
 }
 
 pub struct Branches {
@@ -164,6 +168,14 @@ impl Branches {
         if to_write.is_empty() {
             return (false, false, edge_num);
         }
+
+        debug!(
+            "[BRANCH] new path: status={:?} new_edges={} total_edges={} bucket_updates={}",
+            status,
+            num_new_edge,
+            edge_num,
+            to_write.len()
+        );
 
         {
             // write

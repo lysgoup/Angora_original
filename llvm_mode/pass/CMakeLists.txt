@@ -52,6 +52,10 @@ add_library(AngoraPass MODULE AngoraPass.cc)
 target_link_libraries(AngoraPass LLVMPassConfig)
 install (TARGETS AngoraPass DESTINATION ${ANGORA_PASS_DIR})
 
+add_library(StorFuzzPass MODULE StorFuzzPass.cc)
+target_link_libraries(StorFuzzPass LLVMPassConfig)
+install (TARGETS StorFuzzPass DESTINATION ${ANGORA_PASS_DIR})
+
 add_library(DFSanPass MODULE DFSanPass.cc)
 target_link_libraries(DFSanPass LLVMPassConfig)
 install (TARGETS DFSanPass DESTINATION ${ANGORA_PASS_DIR})

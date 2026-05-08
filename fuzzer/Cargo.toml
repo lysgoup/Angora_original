@@ -6,6 +6,16 @@ edition = "2018"
 
 [features]
 unstable = []
+storfuzz = []
+
+[[bin]]
+name = "fuzzer"
+path = "src/bin/fuzzer.rs"
+
+[[bin]]
+name = "angora_storfuzz"
+path = "src/bin/fuzzer.rs"
+required-features = ["storfuzz"]
 
 [dependencies]
 clap = "2.32"
