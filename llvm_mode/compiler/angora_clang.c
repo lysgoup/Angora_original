@@ -188,15 +188,6 @@ static void add_angora_runtime() {
   cc_params[cc_par_cnt++] = "-lm";
 }
 
-static void add_storfuzz_pass() {
-  if (clang_type == CLANG_FAST_TYPE && getenv("ANGORA_USE_STORFUZZ")) {
-    cc_params[cc_par_cnt++] = "-Xclang";
-    cc_params[cc_par_cnt++] = "-load";
-    cc_params[cc_par_cnt++] = "-Xclang";
-    cc_params[cc_par_cnt++] =
-        alloc_printf("%s/pass/libStorFuzzPass.so", obj_path);
-  }
-}
 
 static void add_dfsan_pass() {
   if (clang_type == CLANG_TRACK_TYPE || clang_type == CLANG_DFSAN_TYPE) {

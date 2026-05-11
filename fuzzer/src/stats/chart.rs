@@ -93,14 +93,11 @@ impl ChartStats {
     fn sync_from_branches(&mut self, gb: &Arc<GlobalBranches>) {
         self.density = Average::new(gb.get_density(), 0);
         self.unique_branches = gb.get_unique_count().into();
-<<<<<<< Updated upstream
-=======
     }
 
     #[cfg(feature = "storfuzz")]
     pub fn set_data_bits(&mut self, n: usize) {
         self.data_bits_set = n.into();
->>>>>>> Stashed changes
     }
 
     fn get_speed(&mut self) {
@@ -132,11 +129,6 @@ impl ChartStats {
             .get(fuzz_type::FuzzType::ExploreFuzz.index())
             .num_conds
             .into()
-    }
-
-    #[cfg(feature = "storfuzz")]
-    pub fn set_data_bits(&mut self, n: usize) {
-        self.data_bits_set = n.into();
     }
 }
 

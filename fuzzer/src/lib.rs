@@ -7,10 +7,7 @@ extern crate derive_more;
 
 mod branches;
 pub mod cond_stmt;
-<<<<<<< Updated upstream
-=======
 #[cfg(feature = "storfuzz")]
->>>>>>> Stashed changes
 mod data_cov;
 mod depot;
 pub mod executor;
