@@ -15,7 +15,11 @@ pub const MAX_INPUT_LEN: usize = 1000000;
 pub const MAP_SIZE_POW2: usize = 20;
 pub const BRANCHES_SIZE: usize = 1 << MAP_SIZE_POW2;
 
+<<<<<<< Updated upstream
 // data_cov.rs
+=======
+// data_cov.rs (StorFuzz)
+>>>>>>> Stashed changes
 pub const DATA_MAP_SIZE_POW2: usize = 17;
 pub const DATA_COV_SIZE: usize = 1 << DATA_MAP_SIZE_POW2;
 

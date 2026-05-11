@@ -15,12 +15,12 @@ fi
 PREFIX=${PREFIX:-${ROOT_DIR}/bin/}
 
 cargo build
-cargo build --release
-
+cargo build --release --features storfuzz
 rm -rf ${PREFIX}
 mkdir -p ${PREFIX}
 mkdir -p ${PREFIX}/lib
 cp target/release/fuzzer ${PREFIX}
+cp target/release/angora_storfuzz ${PREFIX}
 cp target/release/*.a ${PREFIX}/lib
 
 cd llvm_mode

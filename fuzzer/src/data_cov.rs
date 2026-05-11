@@ -2,8 +2,11 @@
  *
  * Mirrors branches.rs in structure and import set.
  * Gated behind #[cfg(feature = "storfuzz")] at all call sites.
+<<<<<<< Updated upstream
  * This file is compiled unconditionally but only instantiated when the
  * feature is active; the struct is zero-cost when unused.
+=======
+>>>>>>> Stashed changes
  */
 
 use angora_common::{config::DATA_COV_SIZE, shm::SHM};
@@ -11,8 +14,12 @@ use angora_common::{config::DATA_COV_SIZE, shm::SHM};
 pub type DataBuf = [u8; DATA_COV_SIZE];
 
 pub struct DataCov {
+<<<<<<< Updated upstream
     /// Accumulates all bits ever seen — a bit that flips from 0→1 here
     /// means the run was interesting for data coverage.
+=======
+    /// Accumulates all bits ever seen.
+>>>>>>> Stashed changes
     virgin: Box<DataBuf>,
     /// Shared-memory region written by instrumented stores in child processes.
     shm: SHM<DataBuf>,
@@ -37,13 +44,20 @@ impl DataCov {
     }
 
     /// Zero the run map before each execution.
+<<<<<<< Updated upstream
     /// Called immediately after Branches::clear_trace() in run_inner().
+=======
+>>>>>>> Stashed changes
     pub fn clear_run_map(&mut self) {
         self.shm.clear();
     }
 
     /// Returns true if this run produced bits not present in the virgin map.
+<<<<<<< Updated upstream
     /// Updates the virgin map in place.  Does NOT touch the branch map.
+=======
+    /// Updates the virgin map in place.
+>>>>>>> Stashed changes
     pub fn has_new(&mut self) -> bool {
         let cur: &DataBuf = &*self.shm;
         let mut novel = false;

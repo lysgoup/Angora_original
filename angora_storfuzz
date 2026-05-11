@@ -1,0 +1,23 @@
+#!/bin/sh
+
+BIN_PATH=$(readlink -f "$0")
+FUZZ_DIR=$(dirname $BIN_PATH)
+
+BUILD_TYPE=${BUILD_TYPE:-release}
+
+if [ -z ${LOG_TYPE} ]
+then LOG_TYPE="info"
+fi
+
+# Respect RUST_LOG if set by caller (run.sh sets RUST_LOG=angora=debug)
+if [ -z ${RUST_LOG} ]
+then RUST_LOG=${LOG_TYPE}
+fi
+
+envs="RUST_BACKTRACE=1 RUST_LOG=${RUST_LOG} ANGORA_BIN_DIR=${FUZZ_DIR}/bin"
+fuzzer="${FUZZ_DIR}/target/${BUILD_TYPE}/angora_storfuzz"
+
+cmd="$envs $fuzzer $*"
+
+# echo $cmd
+eval $cmd
