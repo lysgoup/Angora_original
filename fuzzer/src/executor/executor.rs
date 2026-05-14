@@ -34,6 +34,10 @@ pub struct Executor {
     pub global_stats: Arc<RwLock<stats::ChartStats>>,
     pub local_stats: stats::LocalStats,
     pub is_dry_run: bool,
+    pub dryrun_track_skipped_speed: usize,
+    pub dryrun_track_skipped_memory: usize,
+    pub dryrun_discarded_count: usize,
+    pub dryrun_forkserver_error_count: usize,
 }
 
 impl Executor {
@@ -97,6 +101,10 @@ impl Executor {
             global_stats,
             local_stats: Default::default(),
             is_dry_run: false,
+            dryrun_track_skipped_speed: 0,
+            dryrun_track_skipped_memory: 0,
+            dryrun_discarded_count: 0,
+            dryrun_forkserver_error_count: 0,
         }
     }
 
@@ -244,9 +252,15 @@ impl Executor {
                         "Skip tracking id {}, speed: {}, speed_ratio: {}, has_new_edge: {}",
                         id, speed, speed_ratio, has_new_edge
                     );
+                    if self.is_dry_run {
+                        self.dryrun_track_skipped_speed += 1;
+                    }
                     return;
                 }
                 let crash_or_tmout = self.try_unlimited_memory(buf, cmpid);
+                if crash_or_tmout && self.is_dry_run {
+                    self.dryrun_track_skipped_memory += 1;
+                }
                 if !crash_or_tmout {
                     let cond_stmts = self.track(id, buf, speed);
                     if cond_stmts.len() > 0 {
@@ -270,22 +284,26 @@ impl Executor {
         self.check_timeout(status, cond)
     }
 
-    pub fn run_sync(&mut self, buf: &Vec<u8>) {
+    pub fn run_sync(&mut self, buf: &Vec<u8>) -> bool {
         self.is_dry_run = true;
         self.run_init();
         let mut status = self.run_inner(buf);
 
-        // Error 발생 시 한 번 재시도
         if status == StatusType::Error {
             warn!("Dry run socket error, retrying after rebind");
             self.rebind_forksrv();
-            self.run_init();
+            self.has_new_path = false;
             status = self.run_inner(buf);
+            if status == StatusType::Error {
+                warn!("Dry run retry also failed, skipping seed");
+                self.is_dry_run = false;
+                return false;
+            }
         }
 
-        info!("run_sync status: {:?}", status);
         self.do_if_has_new(buf, status, false, 0);
         self.is_dry_run = false;
+        true
     }
 
     fn run_init(&mut self) {
@@ -460,3 +478,5 @@ impl Executor {
         self.last_f = defs::UNREACHABLE;
     }
 }
+
+
