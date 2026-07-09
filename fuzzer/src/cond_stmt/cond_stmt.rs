@@ -111,6 +111,7 @@ impl CondStmt {
         afl_cond.base.cmpid = id as u32;
         afl_cond.base.context = 0;
         afl_cond.base.order = 0;
+        afl_cond.base.belong = id as u32;
         afl_cond.base.arg1 = edge_num as u64;
         afl_cond
     }
