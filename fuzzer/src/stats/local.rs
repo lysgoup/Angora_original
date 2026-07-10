@@ -1,10 +1,8 @@
 use super::*;
-use crate::{cond_stmt::CondStmt, executor::StatusType, fuzz_type::FuzzType};
+use crate::executor::StatusType;
 
 #[derive(Default)]
 pub struct LocalStats {
-    pub fuzz_type: FuzzType,
-
     pub num_exec: Counter,
     pub num_inputs: Counter,
     pub num_hangs: Counter,
@@ -18,8 +16,9 @@ pub struct LocalStats {
 }
 
 impl LocalStats {
-    pub fn register(&mut self, cond: &CondStmt) {
-        self.fuzz_type = cond.get_fuzz_type();
+    // Called once per seed picked up by fuzz_loop, before running it through the mutation
+    // menu -- resets the per-round counters synced into ChartStats on the next update_log().
+    pub fn register(&mut self) {
         self.clear();
     }
 

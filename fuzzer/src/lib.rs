@@ -6,9 +6,9 @@ extern crate log;
 extern crate derive_more;
 
 mod branches;
-pub mod cond_stmt;
 mod depot;
 pub mod executor;
+pub mod hint;
 mod mut_input;
 mod search;
 mod stats;
@@ -16,7 +16,6 @@ pub mod track;
 
 mod fuzz_loop;
 mod fuzz_main;
-mod fuzz_type;
 
 mod bind_cpu;
 mod check_dep;

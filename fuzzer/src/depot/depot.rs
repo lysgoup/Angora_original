@@ -1,22 +1,34 @@
 use super::*;
-use crate::{cond_stmt::CondStmt, executor::StatusType};
+use crate::{executor::StatusType, hint::TaintHint};
 use rand;
 use std::{
+    collections::{HashMap, VecDeque},
     fs,
     io::prelude::*,
-    mem,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicUsize, Ordering},
         Mutex,
     },
 };
-// https://crates.io/crates/priority-queue
-use angora_common::config;
-use priority_queue::PriorityQueue;
+
+// One seed input's scheduling metadata: the taint hints gathered the one time it was tracked,
+// plus how many times it's been picked for mutation. Replaces CondStmt as the thing the
+// fuzz loop schedules -- this fuzzer's queue holds inputs, not individual branch constraints.
+pub struct QueueEntry {
+    pub id: usize,
+    pub hints: Vec<TaintHint>,
+    pub speed: u32,
+    pub edge_num: u32,
+    pub fuzzed_count: usize,
+}
 
 pub struct Depot {
-    pub queue: Mutex<PriorityQueue<CondStmt, QPriority>>,
+    // Round-robin schedule of input ids. A plain FIFO ring is enough now that every entry is
+    // "just an input" -- pop the front, mutate it, push it back -- there's no more
+    // AFL-cond-vs-regular-cond priority distinction to justify a priority queue.
+    queue: Mutex<VecDeque<usize>>,
+    pub entries: Mutex<HashMap<usize, QueueEntry>>,
     pub num_inputs: AtomicUsize,
     pub num_hangs: AtomicUsize,
     pub num_crashes: AtomicUsize,
@@ -26,7 +38,8 @@ pub struct Depot {
 impl Depot {
     pub fn new(in_dir: PathBuf, out_dir: &Path) -> Self {
         Self {
-            queue: Mutex::new(PriorityQueue::new()),
+            queue: Mutex::new(VecDeque::new()),
+            entries: Mutex::new(HashMap::new()),
             num_inputs: AtomicUsize::new(0),
             num_hangs: AtomicUsize::new(0),
             num_crashes: AtomicUsize::new(0),
@@ -34,20 +47,9 @@ impl Depot {
         }
     }
 
-    fn save_input(
-        status: &StatusType,
-        buf: &Vec<u8>,
-        num: &AtomicUsize,
-        cmpid: u32,
-        dir: &Path,
-    ) -> usize {
+    fn save_input(status: &StatusType, buf: &Vec<u8>, num: &AtomicUsize, dir: &Path) -> usize {
         let id = num.fetch_add(1, Ordering::Relaxed);
-        trace!(
-            "Find {} th new {:?} input by fuzzing {}.",
-            id,
-            status,
-            cmpid
-        );
+        trace!("Find {} th new {:?} input.", id, status);
         let new_path = get_file_name(dir, id);
         let mut f = fs::File::create(new_path.as_path()).expect("Could not save new input file.");
         f.write_all(buf)
@@ -56,21 +58,17 @@ impl Depot {
         id
     }
 
-    pub fn save(&self, status: StatusType, buf: &Vec<u8>, cmpid: u32) -> usize {
+    pub fn save(&self, status: StatusType, buf: &Vec<u8>) -> usize {
         match status {
             StatusType::Normal => {
-                Self::save_input(&status, buf, &self.num_inputs, cmpid, &self.dirs.inputs_dir)
+                Self::save_input(&status, buf, &self.num_inputs, &self.dirs.inputs_dir)
             },
             StatusType::Timeout => {
-                Self::save_input(&status, buf, &self.num_hangs, cmpid, &self.dirs.hangs_dir)
+                Self::save_input(&status, buf, &self.num_hangs, &self.dirs.hangs_dir)
             },
-            StatusType::Crash => Self::save_input(
-                &status,
-                buf,
-                &self.num_crashes,
-                cmpid,
-                &self.dirs.crashes_dir,
-            ),
+            StatusType::Crash => {
+                Self::save_input(&status, buf, &self.num_crashes, &self.dirs.crashes_dir)
+            },
             _ => 0,
         }
     }
@@ -88,76 +86,72 @@ impl Depot {
         read_from_file(&path)
     }
 
-    pub fn get_entry(&self) -> Option<(CondStmt, QPriority)> {
-        let mut q = match self.queue.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => {
-                warn!("Mutex poisoned! Results may be incorrect. Continuing...");
-                poisoned.into_inner()
-            },
+    // Called once, right after a freshly-saved Normal input has been tracked: attaches its
+    // hints and enters it into the schedule. Also feeds the reuse pool (label_pattern_tracker)
+    // from these hints, since that's the only place critical values get harvested from.
+    // `parent_buf` is the seed this input was mutated from (None for raw/dry-run/AFL-synced
+    // seeds); only hints tied to bytes that actually differ from the parent get cached.
+    pub fn set_hints(
+        &self,
+        id: usize,
+        hints: Vec<TaintHint>,
+        speed: u32,
+        edge_num: u32,
+        parent_buf: Option<&[u8]>,
+    ) {
+        label_pattern_tracker::add_hints_to_pattern_map(&hints, self, id, parent_buf);
+
+        let entry = QueueEntry {
+            id,
+            hints,
+            speed,
+            edge_num,
+            fuzzed_count: 0,
         };
-        q.peek()
-            .and_then(|x| Some((x.0.clone(), x.1.clone())))
-            .and_then(|x| {
-                if !x.1.is_done() {
-                    let q_inc = x.1.inc(x.0.base.op);
-                    q.change_priority(&(x.0), q_inc);
-                }
-                Some(x)
-            })
+        self.entries.lock().unwrap().insert(id, entry);
+        self.queue.lock().unwrap().push_back(id);
     }
 
-    pub fn add_entries(&self, conds: Vec<CondStmt>) {
-        let mut q = match self.queue.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => {
-                warn!("Mutex poisoned! Results may be incorrect. Continuing...");
-                poisoned.into_inner()
-            },
-        };
+    // Pops the least-recently-fuzzed input id and requeues it at the back (round-robin).
+    pub fn get_entry(&self) -> Option<usize> {
+        let mut q = self.queue.lock().unwrap();
+        let id = q.pop_front()?;
+        q.push_back(id);
+        Some(id)
+    }
 
-        for mut cond in conds {
-            if cond.is_desirable {
-                if let Some(v) = q.get_mut(&cond) {
-                    if !v.0.is_done() {
-                        // If existed one and our new one has two different conditions,
-                        // this indicate that it is explored.
-                        if v.0.base.condition != cond.base.condition {
-                            v.0.mark_as_done();
-                            q.change_priority(&cond, QPriority::done());
-                        } else {
-                            // Existed, but the new one are better
-                            // If the cond is faster than the older one, we prefer the faster,
-                            if config::PREFER_FAST_COND && v.0.speed > cond.speed {
-                                mem::swap(v.0, &mut cond);
-                                let priority = QPriority::init(cond.base.op);
-                                q.change_priority(&cond, priority);
-                            }
-                        }
-                    }
-                } else {
-                    let priority = QPriority::init(cond.base.op);
-                    q.push(cond, priority);
-                }
-            }
+    pub fn get_hints(&self, id: usize) -> Vec<TaintHint> {
+        self.entries
+            .lock()
+            .unwrap()
+            .get(&id)
+            .map(|e| e.hints.clone())
+            .unwrap_or_default()
+    }
+
+    // (speed, edge_num, fuzzed_count) in one lock acquisition.
+    pub fn get_entry_info(&self, id: usize) -> (u32, u32, usize) {
+        self.entries
+            .lock()
+            .unwrap()
+            .get(&id)
+            .map(|e| (e.speed, e.edge_num, e.fuzzed_count))
+            .unwrap_or((0, 0, 0))
+    }
+
+    pub fn update_entry(&self, id: usize) {
+        if let Some(entry) = self.entries.lock().unwrap().get_mut(&id) {
+            entry.fuzzed_count += 1;
         }
     }
 
-    pub fn update_entry(&self, cond: CondStmt) {
-        let mut q = match self.queue.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => {
-                warn!("Mutex poisoned! Results may be incorrect. Continuing...");
-                poisoned.into_inner()
-            },
-        };
-        if let Some(v) = q.get_mut(&cond) {
-            v.0.clone_from(&cond);
-        } else {
-            warn!("Update entry: can not find this cond");
-        }
-        if cond.is_discarded() {
-            q.change_priority(&cond, QPriority::done());
-        }
+    pub fn max_fuzzed_count(&self) -> usize {
+        self.entries
+            .lock()
+            .unwrap()
+            .values()
+            .map(|e| e.fuzzed_count)
+            .max()
+            .unwrap_or(0)
     }
 }

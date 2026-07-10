@@ -1,4 +1,4 @@
-use crate::{check_dep, search, tmpfs};
+use crate::{check_dep, tmpfs};
 use angora_common::defs;
 use std::{
     env, fs,
@@ -44,7 +44,6 @@ pub struct CommandOpt {
     pub forksrv_socket_path: String,
     pub track_path: String,
     pub is_stdin: bool,
-    pub search_method: search::SearchMethod,
     pub mem_limit: u64,
     pub time_limit: u64,
     pub is_raw: bool,
@@ -60,7 +59,6 @@ impl CommandOpt {
         track_target: &str,
         pargs: Vec<String>,
         out_dir: &Path,
-        search_method: &str,
         mut mem_limit: u64,
         time_limit: u64,
         enable_afl: bool,
@@ -151,7 +149,6 @@ impl CommandOpt {
             forksrv_socket_path,
             track_path,
             is_stdin: !has_input_arg,
-            search_method: search::parse_search_method(search_method),
             mem_limit,
             time_limit,
             uses_asan,

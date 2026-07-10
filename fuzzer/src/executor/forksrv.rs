@@ -135,8 +135,8 @@ impl Forksrv {
                         return StatusType::Error;
                     },
                 };
-                let exit_code = libc::WEXITSTATUS(status) ;
-                let signaled = libc::WIFSIGNALED(status) ;
+                let exit_code = libc::WEXITSTATUS(status);
+                let signaled = libc::WIFSIGNALED(status);
                 if signaled || (self.uses_asan && exit_code == MSAN_ERROR_CODE) {
                     debug!("Crash code: {}", status);
                     StatusType::Crash

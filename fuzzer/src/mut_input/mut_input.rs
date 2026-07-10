@@ -6,7 +6,7 @@ use rand::{self, distributions::Uniform, Rng};
 
 use std::{fmt, u8};
 //use std::u16;
-use std::{cmp, u32, u64};
+use std::{u32, u64};
 
 #[derive(Clone, Debug, Constructor)]
 struct InputMeta {
@@ -110,22 +110,6 @@ impl MutInput {
     pub fn set(&mut self, index: usize, val: u64) {
         let info = &self.meta[index];
         set_val_in_buf(&mut self.value, info.offset, info.size, val);
-    }
-
-    pub fn assign(&mut self, val: &Vec<u8>) {
-        let l = cmp::min(val.len(), self.val_len());
-        if l > 0 {
-            let scope = &mut self.value[0..l];
-            scope.clone_from_slice(&val[0..l]);
-        }
-    }
-
-    pub fn get_value(&self) -> Vec<u8> {
-        self.value.clone()
-    }
-
-    pub fn set_value_from_input(&mut self, input: &MutInput) {
-        self.value = input.get_value();
     }
 
     pub fn bitflip(&mut self, i: usize) {

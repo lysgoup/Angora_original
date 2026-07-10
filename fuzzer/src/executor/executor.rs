@@ -1,10 +1,6 @@
 use super::{limit::SetLimit, *};
 
-use crate::{
-    branches, command,
-    cond_stmt::{self, NextState},
-    depot, stats, track,
-};
+use crate::{branches, command, depot, hint, stats, track};
 use angora_common::{config, defs};
 
 use std::{
@@ -22,14 +18,11 @@ use wait_timeout::ChildExt;
 pub struct Executor {
     pub cmd: command::CommandOpt,
     pub branches: branches::Branches,
-    pub t_conds: cond_stmt::ShmConds,
     envs: HashMap<String, String>,
     forksrv: Option<Forksrv>,
     depot: Arc<depot::Depot>,
     fd: PipeFd,
     tmout_cnt: usize,
-    invariable_cnt: usize,
-    pub last_f: u64,
     pub has_new_path: bool,
     pub global_stats: Arc<RwLock<stats::ChartStats>>,
     pub local_stats: stats::LocalStats,
@@ -44,7 +37,6 @@ impl Executor {
     ) -> Self {
         // ** Share Memory **
         let branches = branches::Branches::new(global_branches);
-        let t_conds = cond_stmt::ShmConds::new();
 
         // ** Envs **
         let mut envs = HashMap::new();
@@ -59,10 +51,6 @@ impl Executor {
         envs.insert(
             defs::BRANCHES_SHM_ENV_VAR.to_string(),
             branches.get_id().to_string(),
-        );
-        envs.insert(
-            defs::COND_STMT_ENV_VAR.to_string(),
-            t_conds.get_id().to_string(),
         );
         envs.insert(
             defs::LD_LIBRARY_PATH_VAR.to_string(),
@@ -84,14 +72,11 @@ impl Executor {
         Self {
             cmd,
             branches,
-            t_conds,
             envs,
             forksrv,
             depot,
             fd,
             tmout_cnt: 0,
-            invariable_cnt: 0,
-            last_f: defs::UNREACHABLE,
             has_new_path: false,
             global_stats,
             local_stats: Default::default(),
@@ -116,86 +101,7 @@ impl Executor {
         self.forksrv = Some(fs);
     }
 
-    // FIXME: The location id may be inconsistent between track and fast programs.
-    fn check_consistent(&self, output: u64, cond: &mut cond_stmt::CondStmt) {
-        if output == defs::UNREACHABLE
-            && cond.is_first_time()
-            && self.local_stats.num_exec == 1.into()
-            && cond.state.is_initial()
-        {
-            cond.is_consistent = false;
-            warn!("inconsistent : {:?}", cond);
-        }
-    }
-
-    fn check_invariable(&mut self, output: u64, cond: &mut cond_stmt::CondStmt) -> bool {
-        let mut skip = false;
-        if output == self.last_f {
-            self.invariable_cnt += 1;
-            if self.invariable_cnt >= config::MAX_INVARIABLE_NUM {
-                debug!("output is invariable! f: {}", output);
-                if cond.is_desirable {
-                    cond.is_desirable = false;
-                }
-                // deterministic will not skip
-                if !cond.state.is_det() && !cond.state.is_one_byte() {
-                    skip = true;
-                }
-            }
-        } else {
-            self.invariable_cnt = 0;
-        }
-        self.last_f = output;
-        skip
-    }
-
-    fn check_explored(
-        &self,
-        cond: &mut cond_stmt::CondStmt,
-        _status: StatusType,
-        output: u64,
-        explored: &mut bool,
-    ) -> bool {
-        let mut skip = false;
-        // If crash or timeout, constraints after the point won't be tracked.
-        if output == 0 && !cond.is_done()
-        //&& status == StatusType::Normal
-        {
-            debug!("Explored this condition!");
-            skip = true;
-            *explored = true;
-            cond.mark_as_done();
-        }
-        skip
-    }
-
-    pub fn run_with_cond(
-        &mut self,
-        buf: &Vec<u8>,
-        cond: &mut cond_stmt::CondStmt,
-    ) -> (StatusType, u64) {
-        self.run_init();
-        self.t_conds.set(cond);
-        let mut status = self.run_inner(buf);
-
-        let output = self.t_conds.get_cond_output();
-        let mut explored = false;
-        let mut skip = false;
-        skip |= self.check_explored(cond, status, output, &mut explored);
-        skip |= self.check_invariable(output, cond);
-        self.check_consistent(output, cond);
-
-        self.do_if_has_new(buf, status, explored, cond.base.cmpid);
-        status = self.check_timeout(status, cond);
-
-        if skip {
-            status = StatusType::Skip;
-        }
-
-        (status, output)
-    }
-
-    fn try_unlimited_memory(&mut self, buf: &Vec<u8>, cmpid: u32) -> bool {
+    fn try_unlimited_memory(&mut self, buf: &Vec<u8>) -> bool {
         let mut skip = false;
         self.branches.clear_trace();
         if self.cmd.is_stdin {
@@ -215,20 +121,24 @@ impl Executor {
             );
             // crash or hang
             if self.branches.has_new(unmem_status).0 {
-                self.depot.save(unmem_status, &buf, cmpid);
+                self.depot.save(unmem_status, &buf);
             }
         }
         skip
     }
 
-    fn do_if_has_new(&mut self, buf: &Vec<u8>, status: StatusType, _explored: bool, cmpid: u32) {
+    // `parent` is the seed this buf was mutated from (None for raw/dry-run/AFL-synced seeds,
+    // which aren't a mutation of anything Angora already knows about) -- used to figure out
+    // which bytes actually changed, so the reuse pool only caches values from hints tied to
+    // that changed region instead of every hint this input happens to carry.
+    fn do_if_has_new(&mut self, buf: &Vec<u8>, status: StatusType, parent: Option<&[u8]>) {
         // new edge: one byte in bitmap
         let (has_new_path, has_new_edge, edge_num) = self.branches.has_new(status);
 
         if has_new_path {
             self.has_new_path = true;
             self.local_stats.find_new(&status);
-            let id = self.depot.save(status, &buf, cmpid);
+            let id = self.depot.save(status, &buf);
 
             if status == StatusType::Normal {
                 self.local_stats.avg_edge_num.update(edge_num as f32);
@@ -244,34 +154,27 @@ impl Executor {
                     );
                     return;
                 }
-                let crash_or_tmout = self.try_unlimited_memory(buf, cmpid);
+                let crash_or_tmout = self.try_unlimited_memory(buf);
                 if !crash_or_tmout {
-                    let cond_stmts = self.track(id, buf, speed);
-                    if cond_stmts.len() > 0 {
-                        self.depot.add_entries(cond_stmts);
-                        if self.cmd.enable_afl {
-                            self.depot
-                                .add_entries(vec![cond_stmt::CondStmt::get_afl_cond(
-                                    id, speed, edge_num,
-                                )]);
-                        }
-                    }
+                    let hints = self.track(id, buf);
+                    self.depot
+                        .set_hints(id, hints, speed, edge_num as u32, parent);
                 }
             }
         }
     }
 
-    pub fn run(&mut self, buf: &Vec<u8>, cond: &mut cond_stmt::CondStmt) -> StatusType {
+    pub fn run(&mut self, buf: &Vec<u8>, parent: &[u8]) -> StatusType {
         self.run_init();
         let status = self.run_inner(buf);
-        self.do_if_has_new(buf, status, false, 0);
-        self.check_timeout(status, cond)
+        self.do_if_has_new(buf, status, Some(parent));
+        self.check_timeout(status)
     }
 
     pub fn run_sync(&mut self, buf: &Vec<u8>) {
         self.run_init();
         let status = self.run_inner(buf);
-        self.do_if_has_new(buf, status, false, 0);
+        self.do_if_has_new(buf, status, None);
     }
 
     fn run_init(&mut self) {
@@ -279,7 +182,7 @@ impl Executor {
         self.local_stats.num_exec.count();
     }
 
-    fn check_timeout(&mut self, status: StatusType, cond: &mut cond_stmt::CondStmt) -> StatusType {
+    fn check_timeout(&mut self, status: StatusType) -> StatusType {
         let mut ret_status = status;
         if ret_status == StatusType::Error {
             self.rebind_forksrv();
@@ -289,7 +192,6 @@ impl Executor {
         if ret_status == StatusType::Timeout {
             self.tmout_cnt = self.tmout_cnt + 1;
             if self.tmout_cnt >= config::TMOUT_SKIP {
-                cond.to_timeout();
                 ret_status = StatusType::Skip;
                 self.tmout_cnt = 0;
             }
@@ -337,7 +239,7 @@ impl Executor {
         used_us / 3
     }
 
-    fn track(&mut self, id: usize, buf: &Vec<u8>, speed: u32) -> Vec<cond_stmt::CondStmt> {
+    fn track(&mut self, id: usize, buf: &Vec<u8>) -> Vec<hint::TaintHint> {
         self.envs.insert(
             defs::TRACK_OUTPUT_VAR.to_string(),
             self.cmd.track_path.clone(),
@@ -351,7 +253,6 @@ impl Executor {
         let ret_status = self.run_target(
             &self.cmd.track,
             config::MEM_LIMIT_TRACK,
-            //self.cmd.time_limit *
             config::TIME_LIMIT_TRACK,
         );
         compiler_fence(Ordering::SeqCst);
@@ -364,16 +265,19 @@ impl Executor {
             return vec![];
         }
 
-        let cond_list = track::load_track_data(
+        let hints = match track::read_log_data(
             Path::new(&self.cmd.track_path),
-            id as u32,
-            speed,
             self.cmd.mode.is_pin_mode(),
-            self.cmd.enable_exploitation,
-        );
+        ) {
+            Ok(log_data) => hint::build_hints(&log_data, self.cmd.enable_exploitation),
+            Err(err) => {
+                error!("parse track file error!! {:?}", err);
+                vec![]
+            },
+        };
 
         self.local_stats.track_time += t_now.into();
-        cond_list
+        hints
     }
 
     pub fn random_input_buf(&self) -> Vec<u8> {
@@ -440,9 +344,6 @@ impl Executor {
             .unwrap()
             .sync_from_local(&mut self.local_stats);
 
-        self.t_conds.clear();
         self.tmout_cnt = 0;
-        self.invariable_cnt = 0;
-        self.last_f = defs::UNREACHABLE;
     }
 }

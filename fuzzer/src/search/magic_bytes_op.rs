@@ -1,0 +1,63 @@
+// Folds the old cmpfn.rs: for a CmpFn-kind hint (strcmp/memcmp-style comparison function),
+// resizes the tainted region to the recorded magic-byte length and writes those bytes in
+// directly. Simpler than the original's diff-correction arithmetic between two encoded magic
+// values -- just try the literal recorded value.
+use super::*;
+
+pub struct MagicBytesOp<'a, 'b> {
+    handler: &'b mut SearchHandler<'a>,
+}
+
+impl<'a, 'b> MagicBytesOp<'a, 'b> {
+    pub fn new(handler: &'b mut SearchHandler<'a>) -> Self {
+        Self { handler }
+    }
+
+    pub fn run(&mut self, hints: &[TaintHint]) {
+        self.handler.set_budget(hints.len().max(1));
+        for hint in hints {
+            if self.handler.is_stopped_or_skip() {
+                break;
+            }
+            if hint.kind != HintKind::CmpFn || hint.offsets.is_empty() || hint.variables.is_empty()
+            {
+                continue;
+            }
+            self.run_one(hint);
+        }
+    }
+
+    fn run_one(&mut self, hint: &TaintHint) {
+        let offsets = &hint.offsets;
+        let begin = offsets[0].begin as usize;
+        let cur_end = offsets.last().unwrap().end as usize;
+        let want_len = hint.variables.len();
+
+        let mut buf = self.handler.buf.clone();
+        if cur_end > buf.len() {
+            buf.resize(cur_end, 0);
+        }
+        let cur_len = cur_end.saturating_sub(begin);
+
+        if want_len > cur_len {
+            let filler = if cur_end > begin { buf[begin] } else { 0 };
+            for _ in 0..(want_len - cur_len) {
+                buf.insert(begin, filler);
+            }
+        } else if want_len < cur_len {
+            for _ in 0..(cur_len - want_len) {
+                if begin < buf.len() {
+                    buf.remove(begin);
+                }
+            }
+        }
+
+        let end = begin + want_len;
+        if end > buf.len() {
+            buf.resize(end, 0);
+        }
+        buf[begin..end].copy_from_slice(&hint.variables);
+
+        self.handler.execute(&buf);
+    }
+}

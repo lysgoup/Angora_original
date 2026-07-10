@@ -1,13 +1,17 @@
 use crate::{
-    branches::GlobalBranches, command::CommandOpt, cond_stmt::NextState, depot::Depot,
-    executor::Executor, fuzz_type::FuzzType, search::*, stats,
+    branches::GlobalBranches, command::CommandOpt, depot::Depot, executor::Executor, search::*,
+    stats,
 };
-use rand::prelude::*;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, RwLock,
 };
 
+// One worker thread's main loop. Unlike the old CondStmt-era version, this doesn't dispatch on
+// a per-branch FuzzType/CondState -- every seed popped off the queue runs through the same
+// fixed mutation menu (AFL havoc/splice, deterministic sweep, reuse-pool splat, and the
+// hint-driven exploit/len/magic-bytes operators), all working off whatever taint hints that
+// seed carries. A seed is never "done" -- it just keeps getting requeued, same as classic AFL.
 pub fn fuzz_loop(
     running: Arc<AtomicBool>,
     cmd_opt: CommandOpt,
@@ -15,7 +19,7 @@ pub fn fuzz_loop(
     global_branches: Arc<GlobalBranches>,
     global_stats: Arc<RwLock<stats::ChartStats>>,
 ) {
-    let search_method = cmd_opt.search_method;
+    let enable_afl = cmd_opt.enable_afl;
     let mut executor = Executor::new(
         cmd_opt,
         global_branches,
@@ -24,99 +28,30 @@ pub fn fuzz_loop(
     );
 
     while running.load(Ordering::Relaxed) {
-        let entry = match depot.get_entry() {
-            Some(e) => e,
+        let id = match depot.get_entry() {
+            Some(id) => id,
             None => break,
         };
 
-        let mut cond = entry.0;
-        let priority = entry.1;
-
-        if priority.is_done() {
-            break;
-        }
-
-        if cond.is_done() {
-            depot.update_entry(cond);
-            continue;
-        }
-
-        trace!("{:?}", cond);
-
-        let belong_input = cond.base.belong as usize;
-
-        /*
-        if config::ENABLE_PREFER_FAST_COND && cond.base.op == defs::COND_AFL_OP {
-            let mut rng = thread_rng();
-            let speed_ratio = depot.get_speed_ratio(belong_input);
-            if speed_ratio > 1 {
-                // [2, 3] -> 2
-                // [4, 7] -> 3
-                // [7, 15] -> 4
-                // [16, ..] -> 5
-                let weight = ((speed_ratio + 1) as f32).log2().ceil() as u32;
-                if !rng.gen_weighted_bool(weight) {
-                    continue;
-                }
-            }
-        }
-        */
-
-        let buf = depot.get_input_buf(belong_input);
+        let buf = depot.get_input_buf(id);
+        let hints = depot.get_hints(id);
+        let (_speed, edge_num, fuzzed_count) = depot.get_entry_info(id);
+        let first_time = fuzzed_count == 0;
 
         {
-            let fuzz_type = cond.get_fuzz_type();
-            let handler = SearchHandler::new(running.clone(), &mut executor, &mut cond, buf);
-            match fuzz_type {
-                FuzzType::ExploreFuzz => {
-                    if handler.cond.is_time_expired() {
-                        handler.cond.next_state();
-                    }
-                    if handler.cond.state.is_one_byte() {
-                        OneByteFuzz::new(handler).run();
-                    } else if handler.cond.state.is_det() {
-                        DetFuzz::new(handler).run();
-                    } else {
-                        match search_method {
-                            SearchMethod::Gd => {
-                                GdSearch::new(handler).run(&mut thread_rng());
-                            },
-                            SearchMethod::Random => {
-                                RandomSearch::new(handler).run();
-                            },
-                            SearchMethod::Cbh => {
-                                CbhSearch::new(handler).run();
-                            },
-                            SearchMethod::Mb => {
-                                MbSearch::new(handler).run();
-                            },
-                        }
-                    }
-                },
-                FuzzType::ExploitFuzz => {
-                    if handler.cond.state.is_one_byte() {
-                        let mut fz = OneByteFuzz::new(handler);
-                        fz.run();
-                        fz.handler.cond.to_unsolvable(); // to skip next time
-                    } else {
-                        ExploitFuzz::new(handler).run();
-                    }
-                },
-                FuzzType::AFLFuzz => {
-                    AFLFuzz::new(handler).run();
-                },
-                FuzzType::LenFuzz => {
-                    LenFuzz::new(handler).run();
-                },
-                FuzzType::CmpFnFuzz => {
-                    FnFuzz::new(handler).run();
-                },
-                FuzzType::OtherFuzz => {
-                    warn!("Unknown fuzz type!!");
-                },
+            let mut handler = SearchHandler::new(running.clone(), &mut executor, buf);
+
+            if enable_afl {
+                AFLFuzz::new(&mut handler, &hints, edge_num as usize).run(first_time);
             }
+
+            DetFuzz::new(&mut handler).run(&hints);
+            ReusingFuzz::new(&mut handler).run(&hints, 50);
+            ExploitOp::new(&mut handler).run(&hints);
+            LenOp::new(&mut handler).run(&hints);
+            MagicBytesOp::new(&mut handler).run(&hints);
         }
 
-        depot.update_entry(cond);
+        depot.update_entry(id);
     }
 }

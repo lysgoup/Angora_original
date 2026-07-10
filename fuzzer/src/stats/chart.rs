@@ -22,9 +22,10 @@ pub struct ChartStats {
     num_hangs: Counter,
     num_crashes: Counter,
 
-    fuzz: FuzzStats,
-    search: SearchStats,
-    state: StateStats,
+    // Size of the reuse pool (label_pattern_tracker) -- the main thing worth watching for this
+    // fuzzer, since reuse is the primary solving mechanism rather than a bolt-on.
+    reuse_patterns: Counter,
+    reuse_records: Counter,
 }
 
 impl ChartStats {
@@ -39,52 +40,23 @@ impl ChartStats {
         local.avg_edge_num.sync(&mut self.avg_edge_num);
         local.avg_exec_time.sync(&mut self.avg_exec_time);
 
-        let st = self.fuzz.get_mut(local.fuzz_type.index());
-        st.time += local.start_time.into();
-        // st.num_conds.count();
-
-        st.num_exec += local.num_exec;
         self.num_exec += local.num_exec;
-        // if has new
-        st.num_inputs += local.num_inputs;
         self.num_inputs += local.num_inputs;
-        st.num_hangs += local.num_hangs;
         self.num_hangs += local.num_hangs;
-        st.num_crashes += local.num_crashes;
         self.num_crashes += local.num_crashes;
-
-        //local.clear();
     }
 
     pub fn sync_from_global(&mut self, depot: &Arc<Depot>, gb: &Arc<GlobalBranches>) {
         self.get_speed();
-        self.iter_pq(depot);
+        self.max_rounds = depot.max_fuzzed_count().into();
+        self.sync_reuse_stats();
         self.sync_from_branches(gb);
     }
 
-    fn iter_pq(&mut self, depot: &Arc<Depot>) {
-        let q = match depot.queue.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => {
-                warn!("Lock poisoned. Results can be incorrect! Continuing...");
-                poisoned.into_inner()
-            },
-        };
-        self.search = Default::default();
-        self.state = Default::default();
-        self.fuzz.clear();
-        let mut max_round = 0;
-        for (item, _) in q.iter() {
-            if item.fuzz_times > max_round {
-                max_round = item.fuzz_times;
-            }
-            self.fuzz.count(&item);
-            if item.base.is_explore() {
-                self.search.count(&item);
-                self.state.count(&item);
-            }
-        }
-        self.max_rounds = max_round.into();
+    fn sync_reuse_stats(&mut self) {
+        let (num_patterns, num_records) = crate::depot::get_pattern_stats();
+        self.reuse_patterns = num_patterns.into();
+        self.reuse_records = num_records.into();
     }
 
     fn sync_from_branches(&mut self, gb: &Arc<GlobalBranches>) {
@@ -115,11 +87,11 @@ impl ChartStats {
         )
     }
 
-    pub fn get_explore_num(&self) -> usize {
-        self.fuzz
-            .get(fuzz_type::FuzzType::ExploreFuzz.index())
-            .num_conds
-            .into()
+    // Stall-detection signal for fuzz_main's main loop: how many interesting inputs have been
+    // found so far. Replaces the old CondStmt-era "how many Explore conds solved" count -- for
+    // an input-centric fuzzer, "found nothing new in a while" is the natural analogue.
+    pub fn get_progress_num(&self) -> usize {
+        self.num_inputs.into()
     }
 }
 
@@ -127,15 +99,6 @@ impl fmt::Display for ChartStats {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         if self.density.0 > 10.0 {
             warn!("Density is too large (> 10%). Please increase `MAP_SIZE_POW2` in and `common/src/config.rs`. Or disable function-call context(density > 50%) by compiling with `ANGORA_CUSTOM_FN_CONTEXT=k` (k is an integer and 0 <= k <= 32) environment variable. Angora disables context if k is 0.");
-        }
-
-        if self.search.multiple_inconsist() {
-            warn!("Multiple inconsistent warnings. It caused by the fast and track programs has different behaviors. If most constraints are inconsistent, ensure they are compiled with the same environment. Otherwise, please report us.");
-            // panic()!
-        }
-
-        if self.fuzz.may_be_model_failure() {
-            warn!("Find small number constraints, please make sure you have modeled the read functions.")
         }
 
         write!(
@@ -146,14 +109,10 @@ impl fmt::Display for ChartStats {
     TIMING |     RUN: {},   TRACK: {}
   COVERAGE |    EDGE: {},   DENSITY: {}%
     EXECS  |   TOTAL: {},     ROUND: {},     MAX_R: {}
-    SPEED  |  PERIOD: {:6}r/s    TIME: {}us, 
+    SPEED  |  PERIOD: {:6}r/s    TIME: {}us,
     FOUND  |    PATH: {},     HANGS: {},   CRASHES: {}
 {}
-{}
-{}
-{}
-{}
-{}
+    REUSE  | PATTERNS: {},   RECORDS: {}
 
 "#,
             get_bunny_logo().bold(),
@@ -170,12 +129,9 @@ impl fmt::Display for ChartStats {
             self.num_inputs,
             self.num_hangs,
             self.num_crashes,
-            " -- FUZZ -- ".blue().bold(),
-            self.fuzz,
-            " -- SEARCH -- ".blue().bold(),
-            self.search,
-            " -- STATE -- ".blue().bold(),
-            self.state,
+            " -- REUSE -- ".blue().bold(),
+            self.reuse_patterns,
+            self.reuse_records,
         )
     }
 }

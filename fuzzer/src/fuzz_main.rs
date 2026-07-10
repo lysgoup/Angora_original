@@ -28,7 +28,6 @@ pub fn fuzz_main(
     num_jobs: usize,
     mem_limit: u64,
     time_limit: u64,
-    search_method: &str,
     sync_afl: bool,
     enable_afl: bool,
     enable_exploitation: bool,
@@ -41,7 +40,6 @@ pub fn fuzz_main(
         track_target,
         pargs,
         &angora_out_dir,
-        search_method,
         mem_limit,
         time_limit,
         enable_afl,
@@ -233,7 +231,7 @@ fn main_thread_sync_and_log(
     stats: &Arc<RwLock<stats::ChartStats>>,
     child_count: Arc<AtomicUsize>,
 ) {
-    let mut last_explore_num = stats.read().unwrap().get_explore_num();
+    let mut last_progress_num = stats.read().unwrap().get_progress_num();
     let sync_dir = Path::new(out_dir);
     let mut synced_ids = HashMap::new();
     if sync_afl {
@@ -252,16 +250,16 @@ fn main_thread_sync_and_log(
         show_stats(&mut log_file, depot, global_branches, stats);
         if Arc::strong_count(&child_count) == 1 {
             let s = stats.read().unwrap();
-            let cur_explore_num = s.get_explore_num();
-            if cur_explore_num == 0 {
-                warn!("There is none constraint in the seeds, please ensure the inputs are vaild in the seed directory, or the program is ran correctly, or the read functions have been marked as source.");
+            let cur_progress_num = s.get_progress_num();
+            if cur_progress_num == 0 {
+                warn!("No interesting input found yet, please ensure the inputs are vaild in the seed directory, or the program is ran correctly.");
                 break;
             } else {
-                if cur_explore_num == last_explore_num {
-                    info!("Solve all constraints!!");
+                if cur_progress_num == last_progress_num {
+                    info!("No new coverage found in a while, stopping.");
                     break;
                 }
-                last_explore_num = cur_explore_num;
+                last_progress_num = cur_progress_num;
             }
         }
     }

@@ -2,21 +2,37 @@
 // All the byte offsets in the input is the input.
 // Random pick offsets, then flip, add/sub ..
 // And GE algorithm.
+// Plus one extra havoc choice: splat a reuse-pool value at one of this seed's own tainted
+// regions, so the classic AFL mutation engine benefits from the reuse pool too, not just
+// ReusingFuzz.
 
 use super::*;
-use rand::{self, distributions::Uniform, Rng};
+use crate::depot::{extract_pattern, sample_records};
+use crate::mut_input::offsets::merge_continuous_segments;
+use angora_common::tag::TagSeg;
+use rand::{self, distributions::Uniform, rngs::ThreadRng, Rng};
 
 static IDX_TO_SIZE: [usize; 4] = [1, 2, 4, 8];
 
-pub struct AFLFuzz<'a> {
-    handler: SearchHandler<'a>,
-    run_ratio: usize,
+// One tainted region this seed carries, plus the kind/eq-ness of the hint it came from --
+// needed so the reuse-splat havoc choice only pulls values recorded under a matching
+// kind/eq-ness (see depot::label_pattern_tracker::sample_records).
+struct OffsetGroup {
+    kind: HintKind,
+    is_eq_like: bool,
+    offsets: Vec<TagSeg>,
 }
 
-impl<'a> AFLFuzz<'a> {
-    pub fn new(handler: SearchHandler<'a>) -> Self {
-        // FIXME:
-        let edge_num = handler.cond.base.arg1 as usize;
+pub struct AFLFuzz<'a, 'b> {
+    handler: &'b mut SearchHandler<'a>,
+    run_ratio: usize,
+    // One entry per hint's offsets, and (separately) per hint's offsets_opt when present --
+    // real tainted regions in this seed that the reuse-splat havoc choice can target.
+    offset_groups: Vec<OffsetGroup>,
+}
+
+impl<'a, 'b> AFLFuzz<'a, 'b> {
+    pub fn new(handler: &'b mut SearchHandler<'a>, hints: &[TaintHint], edge_num: usize) -> Self {
         let avg_edge_num = handler.executor.local_stats.avg_edge_num.get() as usize;
         let run_ratio = if edge_num * 3 < avg_edge_num {
             2
@@ -26,15 +42,39 @@ impl<'a> AFLFuzz<'a> {
             5
         };
 
-        Self { handler, run_ratio }
+        let mut offset_groups = Vec::new();
+        for hint in hints {
+            let is_eq_like = hint.is_eq_like();
+            if !hint.offsets.is_empty() {
+                offset_groups.push(OffsetGroup {
+                    kind: hint.kind,
+                    is_eq_like,
+                    offsets: hint.offsets.clone(),
+                });
+            }
+            if !hint.offsets_opt.is_empty() {
+                offset_groups.push(OffsetGroup {
+                    kind: hint.kind,
+                    is_eq_like,
+                    offsets: hint.offsets_opt.clone(),
+                });
+            }
+        }
+
+        Self {
+            handler,
+            run_ratio,
+            offset_groups,
+        }
     }
 
-    pub fn run(&mut self) {
-        if self.handler.cond.is_first_time() {
+    pub fn run(&mut self, first_time: bool) {
+        if first_time {
             self.afl_len();
         }
 
-        self.handler.max_times = (config::MAX_SPLICE_TIMES * self.run_ratio).into();
+        self.handler
+            .set_budget(config::MAX_SPLICE_TIMES * self.run_ratio);
         loop {
             if self.handler.is_stopped_or_skip() {
                 break;
@@ -49,12 +89,14 @@ impl<'a> AFLFuzz<'a> {
         } else {
             256
         };
-        let max_choice = if config::ENABLE_MICRO_RANDOM_LEN {
+        let base_choice = if config::ENABLE_MICRO_RANDOM_LEN {
             8
         } else {
             6
         };
-
+        // +1: reuse-pool splat slot, always on (the pattern map is just empty early on, so
+        // this is a no-op until the reuse pool has something).
+        let max_choice = base_choice + 1;
         let choice_range = Uniform::new(0, max_choice);
 
         self.handler.max_times += (config::MAX_HAVOC_FLIP_TIMES * self.run_ratio).into();
@@ -65,7 +107,7 @@ impl<'a> AFLFuzz<'a> {
                 break;
             }
             let mut buf = self.handler.buf.clone();
-            self.havoc_flip(&mut buf, max_stacking, choice_range);
+            self.havoc_flip(&mut buf, max_stacking, choice_range, base_choice);
             self.handler.execute(&buf);
         }
     }
@@ -117,14 +159,62 @@ impl<'a> AFLFuzz<'a> {
         }
     }
 
+    // Picks one of this seed's own tainted regions and, if the reuse pool holds a value for
+    // that region's segment-length pattern, splats it in directly instead of a random tweak.
+    fn reuse_splat(&self, buf: &mut Vec<u8>, rng: &mut ThreadRng) {
+        let group = match self.offset_groups.choose(rng) {
+            Some(g) => g,
+            None => return,
+        };
+        let merged = merge_continuous_segments(&group.offsets);
+        let pattern = extract_pattern(&merged);
+        if pattern.is_empty() {
+            return;
+        }
+        let max_end = merged.iter().map(|s| s.end as usize).max().unwrap_or(0);
+        if max_end > buf.len() {
+            return;
+        }
+        let records = match sample_records(&pattern, group.kind, group.is_eq_like, 1) {
+            Some(r) => r,
+            None => return,
+        };
+        let record = match records.first() {
+            Some(r) => r,
+            None => return,
+        };
+        if record.critical_values.len() != merged.len() {
+            return;
+        }
+        for (seg, value) in merged.iter().zip(record.critical_values.iter()) {
+            let begin = seg.begin as usize;
+            let end = seg.end as usize;
+            let copy_len = value.len().min(end - begin);
+            buf[begin..begin + copy_len].copy_from_slice(&value[..copy_len]);
+        }
+    }
+
     // TODO both endian?
-    fn havoc_flip(&self, buf: &mut Vec<u8>, max_stacking: usize, choice_range: Uniform<u32>) {
+    fn havoc_flip(
+        &self,
+        buf: &mut Vec<u8>,
+        max_stacking: usize,
+        choice_range: Uniform<u32>,
+        reusing_choice: u32,
+    ) {
         let mut rng = rand::thread_rng();
         let mut byte_len = buf.len() as u32;
         let use_stacking = 1 + rng.gen_range(0, max_stacking);
 
         for _ in 0..use_stacking {
-            match rng.sample(choice_range) {
+            let choice = rng.sample(choice_range);
+
+            if choice == reusing_choice {
+                self.reuse_splat(buf, &mut rng);
+                continue;
+            }
+
+            match choice {
                 0 | 1 => {
                     // flip bit
                     let byte_idx: u32 = rng.gen_range(0, byte_len);
@@ -171,7 +261,6 @@ impl<'a> AFLFuzz<'a> {
                     let remove_len: u32 = rng.gen_range(1, 5);
                     if byte_len > remove_len {
                         byte_len -= remove_len;
-                        //assert!(byte_len > 0);
                         let byte_idx: u32 = rng.gen_range(0, byte_len);
                         for _ in 0..remove_len {
                             buf.remove(byte_idx as usize);
@@ -201,7 +290,6 @@ impl<'a> AFLFuzz<'a> {
             return;
         }
 
-        // let step = std::cmp::max( len / config::INFLATE_MAX_ITER_NUM + 1, 5);
         let orig_len = self.handler.buf.len();
         let mut rng = rand::thread_rng();
 

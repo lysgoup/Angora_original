@@ -1,7 +1,6 @@
 extern crate angora;
 extern crate angora_common;
-use angora::{cond_stmt::CondStmt, track::*};
-use angora_common::defs;
+use angora::track::*;
 use std::{env, path::PathBuf};
 
 fn main() {
@@ -16,7 +15,6 @@ fn main() {
     if args.len() > 2 {
         output_format = match args[2].as_str() {
             "line" => "line",
-            "json_real" => "json_real",
             _ => "json",
         };
     }
@@ -31,41 +29,20 @@ fn main() {
 
     let path = PathBuf::from(&args[1]);
 
-    // let t = load_track_data(path.as_path(), 0, 0, 0, 0);
-    let t = match read_and_parse(path.as_path(), pin_mode, false) {
+    let log_data = match read_log_data(path.as_path(), pin_mode) {
         Result::Ok(val) => val,
         Result::Err(err) => panic!("parse track file error!! {:?}", err),
     };
+    let hints = angora::hint::build_hints(&log_data, false);
 
     if output_format == "line" {
-        for cond in t {
-            // println!("{:?}", cond.base);
-            let op = cond.base.op;
-            if (op & defs::COND_BASIC_MASK) == defs::COND_SW_OP {
-                // println!("SW: cmpid {}, context {}, order{}, condition {}",
-                // cond.base.cmpid, cond.base.context, cond.base.order, cond.base.condition);
-            } else if cond.base.is_explore() {
-                println!(
-                    "CMP: cmpid {}, context {}, args ({}, {}), condition {}",
-                    cond.base.cmpid,
-                    cond.base.context,
-                    cond.base.arg1,
-                    cond.base.arg2,
-                    cond.base.condition
-                );
-            }
+        for hint in &hints {
+            println!(
+                "cmpid {}, kind {:?}, args ({}, {}), condition {}",
+                hint.cmpid, hint.kind, hint.arg1, hint.arg2, hint.condition
+            );
         }
-    } else if output_format == "json_real" {
-        let json = get_json(&t);
-        println!("{}", json);
     } else {
-        print!("{:#?}", t);
+        print!("{:#?}", hints);
     }
-}
-
-pub fn get_json(t: &Vec<CondStmt>) -> String {
-    match serde_json::to_string(&t) {
-        Result::Ok(val) => return val,
-        Result::Err(err) => panic!("Failed to serialize to json!! {:?}", err),
-    };
 }

@@ -1,28 +1,25 @@
 use super::*;
 use crate::stats::Counter;
 
+// Shared execution/budget plumbing every mutation operator in the per-seed menu
+// (fuzz_loop.rs) is built on. Unlike the old CondStmt-era SearchHandler, this holds no
+// per-branch state to solve -- operators read hints (fuzzer/src/hint) as read-only guidance
+// and just mutate `buf`; success is judged by the executor's own new-coverage detection
+// (has_new_path/has_new_edge), not by any distance-to-zero signal this handler tracks.
 pub struct SearchHandler<'a> {
     running: Arc<AtomicBool>,
     pub executor: &'a mut Executor,
-    pub cond: &'a mut CondStmt,
     pub buf: Vec<u8>,
     pub max_times: Counter,
     pub skip: bool,
 }
 
 impl<'a> SearchHandler<'a> {
-    pub fn new(
-        running: Arc<AtomicBool>,
-        executor: &'a mut Executor,
-        cond: &'a mut CondStmt,
-        buf: Vec<u8>,
-    ) -> Self {
-        executor.local_stats.register(cond);
-        cond.fuzz_times = cond.fuzz_times + 1;
+    pub fn new(running: Arc<AtomicBool>, executor: &'a mut Executor, buf: Vec<u8>) -> Self {
+        executor.local_stats.register();
         Self {
             running,
             executor,
-            cond,
             buf,
             max_times: config::MAX_SEARCH_EXEC_NUM.into(),
             skip: false,
@@ -31,6 +28,17 @@ impl<'a> SearchHandler<'a> {
 
     pub fn is_stopped_or_skip(&self) -> bool {
         !self.running.load(Ordering::Relaxed) || self.skip
+    }
+
+    // Grants this operator its own execution allowance on top of whatever earlier operators in
+    // this round have already spent, and clears any skip they left behind. Since one handler
+    // now runs the whole mutation menu (AFL, Det, Reusing, ...) per seed instead of one
+    // operator per handler, budgets must stack relative to num_exec rather than each operator
+    // overwriting max_times with its own absolute constant (which would immediately trip skip
+    // for whichever operator runs later).
+    pub fn set_budget(&mut self, budget: usize) {
+        self.skip = false;
+        self.max_times = (self.executor.local_stats.num_exec.0 + budget).into();
     }
 
     fn process_status(&mut self, status: StatusType) {
@@ -48,45 +56,19 @@ impl<'a> SearchHandler<'a> {
 
         // Skip if it reach max epoch,
         // Like a Round-Robin algorithm,
-        // To avoid stuck in some cond too much time.
+        // To avoid stuck on one seed too much time.
         if self.executor.local_stats.num_exec > self.max_times {
             self.skip = true;
         }
     }
 
+    // `buf` is a candidate the caller built (typically a clone of self.buf with some bytes
+    // changed) -- self.buf itself is never mutated by execute, it stays the stable base every
+    // operator tries variants against, and doubles as the "parent" the executor diffs against
+    // to figure out which bytes this candidate actually changed.
     pub fn execute(&mut self, buf: &Vec<u8>) {
-        let status = self.executor.run(buf, self.cond);
+        let status = self.executor.run(buf, &self.buf);
         self.process_status(status);
-    }
-
-    pub fn execute_input(&mut self, input: &MutInput) {
-        input.write_to_input(&self.cond.offsets, &mut self.buf);
-        let status = self.executor.run(&self.buf, self.cond);
-        self.process_status(status);
-    }
-
-    pub fn execute_cond(&mut self, input: &MutInput) -> u64 {
-        input.write_to_input(&self.cond.offsets, &mut self.buf);
-        let (status, f_output) = self.executor.run_with_cond(&self.buf, self.cond);
-        self.process_status(status);
-        // output will be u64::MAX if unreachable, including timeout and crash
-        f_output
-    }
-
-    pub fn execute_cond_direct(&mut self) -> u64 {
-        let (status, f_output) = self.executor.run_with_cond(&self.buf, self.cond);
-        self.process_status(status);
-        f_output
-    }
-
-    pub fn execute_input_direct(&mut self) {
-        let status = self.executor.run(&self.buf, self.cond);
-        self.process_status(status);
-    }
-
-    pub fn get_f_input(&self) -> MutInput {
-        debug!("input offset: {:?}", self.cond.offsets);
-        MutInput::from(&self.cond.offsets, &self.buf)
     }
 }
 
