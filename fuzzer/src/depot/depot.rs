@@ -12,6 +12,19 @@ use std::{
     },
 };
 
+// How far ReusingFuzz's main sweep (search/reusing.rs::try_offsets) has already gotten into
+// the reuse pool for one hint's offsets / offsets_opt / merged-both-operands view, so a
+// repeat visit to this input only tries values it hasn't tried yet on that exact hint instead
+// of re-applying ones already known not to help. All three are independent: they're separate
+// patterns (different segment-length lists in general) with their own position in the pool.
+// Parallel array to QueueEntry.hints (same index, same length).
+#[derive(Default, Clone, Copy)]
+pub struct ReusingCursor {
+    pub offsets: usize,
+    pub offsets_opt: usize,
+    pub merged: usize,
+}
+
 // One seed input's scheduling metadata: the taint hints gathered the one time it was tracked,
 // plus how many times it's been picked for mutation. Replaces CondStmt as the thing the
 // fuzz loop schedules -- this fuzzer's queue holds inputs, not individual branch constraints.
@@ -21,6 +34,7 @@ pub struct QueueEntry {
     pub speed: u32,
     pub edge_num: u32,
     pub fuzzed_count: usize,
+    pub reusing_cursors: Vec<ReusingCursor>,
 }
 
 pub struct Depot {
@@ -101,12 +115,14 @@ impl Depot {
     ) {
         label_pattern_tracker::add_hints_to_pattern_map(&hints, self, id, parent_buf);
 
+        let reusing_cursors = vec![ReusingCursor::default(); hints.len()];
         let entry = QueueEntry {
             id,
             hints,
             speed,
             edge_num,
             fuzzed_count: 0,
+            reusing_cursors,
         };
         self.entries.lock().unwrap().insert(id, entry);
         self.queue.lock().unwrap().push_back(id);
@@ -127,6 +143,21 @@ impl Depot {
             .get(&id)
             .map(|e| e.hints.clone())
             .unwrap_or_default()
+    }
+
+    pub fn get_cursors(&self, id: usize) -> Vec<ReusingCursor> {
+        self.entries
+            .lock()
+            .unwrap()
+            .get(&id)
+            .map(|e| e.reusing_cursors.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn set_cursors(&self, id: usize, cursors: Vec<ReusingCursor>) {
+        if let Some(entry) = self.entries.lock().unwrap().get_mut(&id) {
+            entry.reusing_cursors = cursors;
+        }
     }
 
     // (speed, edge_num, fuzzed_count) in one lock acquisition.

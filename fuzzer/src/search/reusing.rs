@@ -5,8 +5,10 @@
 // candidate "worked" is entirely the executor's business (has_new_path/has_new_edge); this
 // just fires off candidates.
 use super::*;
-use crate::depot::{extract_pattern, get_single_segment_pool, sample_records};
-use crate::mut_input::offsets::merge_continuous_segments;
+use crate::depot::{
+    extract_pattern, get_single_segment_pool, next_records, report_success, ReusingCursor,
+};
+use crate::mut_input::offsets::{merge_continuous_segments, merge_offsets};
 use angora_common::tag::TagSeg;
 
 pub struct ReusingFuzz<'a, 'b> {
@@ -18,14 +20,23 @@ impl<'a, 'b> ReusingFuzz<'a, 'b> {
         Self { handler }
     }
 
-    pub fn run(&mut self, hints: &[TaintHint], iterations: usize) {
+    // `cursors` is parallel to `hints` (same index, same length -- see depot::QueueEntry) and
+    // persists across visits to this seed, so the same value is never re-applied to the same
+    // hint offsets twice: this is a deterministic sweep through the pool, not a repeated random
+    // sample of it.
+    pub fn run(
+        &mut self,
+        hints: &[TaintHint],
+        cursors: &mut Vec<ReusingCursor>,
+        iterations: usize,
+    ) {
         // Roughly: offsets + offsets_opt + combined-offsets + combined-offsets_opt, each up to
         // `iterations` executions per hint -- must call set_budget (not just rely on whatever
         // budget/skip state an earlier operator in this round left behind), otherwise this
         // "main" solver silently does nothing whenever it runs after an operator that already
         // exhausted its own budget (skip stays true from there).
         self.handler.set_budget(iterations * hints.len().max(1) * 4);
-        for hint in hints {
+        for (i, hint) in hints.iter().enumerate() {
             if self.handler.is_stopped_or_skip() {
                 break;
             }
@@ -33,12 +44,41 @@ impl<'a, 'b> ReusingFuzz<'a, 'b> {
                 continue;
             }
             let is_eq_like = hint.is_eq_like();
-            self.try_offsets(&hint.offsets, hint.kind, is_eq_like, iterations);
+            let cursor = cursors
+                .get_mut(i)
+                .expect("cursors must be parallel to hints");
+            self.try_offsets(
+                &hint.offsets,
+                hint.kind,
+                is_eq_like,
+                &mut cursor.offsets,
+                iterations,
+            );
             if self.handler.is_stopped_or_skip() {
                 break;
             }
             if !hint.offsets_opt.is_empty() {
-                self.try_offsets(&hint.offsets_opt, hint.kind, is_eq_like, iterations);
+                self.try_offsets(
+                    &hint.offsets_opt,
+                    hint.kind,
+                    is_eq_like,
+                    &mut cursor.offsets_opt,
+                    iterations,
+                );
+                if self.handler.is_stopped_or_skip() {
+                    break;
+                }
+                // Both operands together as one region (e.g. x's and y's taint combined for
+                // `x == y`) -- a distinct pattern from either side alone, with its own
+                // independent cursor, since it's a separate pool lookup.
+                let merged = merge_offsets(&hint.offsets, &hint.offsets_opt);
+                self.try_offsets(
+                    &merged,
+                    hint.kind,
+                    is_eq_like,
+                    &mut cursor.merged,
+                    iterations,
+                );
             }
         }
 
@@ -52,6 +92,7 @@ impl<'a, 'b> ReusingFuzz<'a, 'b> {
         offsets: &Vec<TagSeg>,
         kind: HintKind,
         is_eq_like: bool,
+        cursor: &mut usize,
         iterations: usize,
     ) {
         let merged = merge_continuous_segments(offsets);
@@ -59,9 +100,9 @@ impl<'a, 'b> ReusingFuzz<'a, 'b> {
         if pattern.is_empty() {
             return;
         }
-        let records = match sample_records(&pattern, kind, is_eq_like, iterations) {
+        let records = match next_records(&pattern, kind, is_eq_like, cursor, iterations) {
             Some(r) => r,
-            None => return,
+            None => return, // nothing past the cursor yet -- already tried everything the pool has for this hint
         };
 
         let base = self.handler.buf.clone();
@@ -71,14 +112,22 @@ impl<'a, 'b> ReusingFuzz<'a, 'b> {
             }
             if let Some(buf) = splat(&merged, &record.critical_values, &base) {
                 self.handler.execute(&buf);
+                // This execution changed exactly one region (this record's value at this
+                // hint's offsets), so a resulting new-coverage finding can be attributed to it
+                // cleanly -- boost its confidence for AFL's reuse-splat to pick more often.
+                if self.handler.executor.has_new_path {
+                    report_success(&pattern, record.id);
+                }
             }
         }
     }
 
     // Mixes critical values observed at *different* comparisons for multi-segment patterns --
     // e.g. segment 1's value came from one cmp, segment 2's from an unrelated one -- since the
-    // exact combination may never have appeared together in any single input. Restricted to
-    // same kind + same eq-like-ness as the consuming hint, same as try_offsets.
+    // exact combination may never have appeared together in any single input. Still randomized
+    // (no cursor): a "combination" doesn't have a stable identity to dedupe against the way a
+    // single pool record does. Restricted to same kind + same eq-like-ness as the consuming
+    // hint, same as try_offsets.
     fn try_combined(&mut self, hints: &[TaintHint], iterations: usize) {
         for hint in hints {
             if self.handler.is_stopped_or_skip() {
@@ -108,7 +157,7 @@ impl<'a, 'b> ReusingFuzz<'a, 'b> {
         }
         let pattern = extract_pattern(&merged);
 
-        let pools: Vec<Vec<Vec<u8>>> = pattern
+        let pools: Vec<Vec<(u64, Vec<u8>)>> = pattern
             .iter()
             .map(|&size| get_single_segment_pool(size, kind, is_eq_like))
             .collect();
@@ -122,15 +171,25 @@ impl<'a, 'b> ReusingFuzz<'a, 'b> {
             if self.handler.is_stopped_or_skip() {
                 break;
             }
-            let values: Vec<Vec<u8>> = pools
+            let chosen: Vec<&(u64, Vec<u8>)> = pools
                 .iter()
-                .filter_map(|pool| pool.choose(&mut rng).cloned())
+                .filter_map(|pool| pool.choose(&mut rng))
                 .collect();
-            if values.len() != merged.len() {
+            if chosen.len() != merged.len() {
                 continue;
             }
+            let values: Vec<Vec<u8>> = chosen.iter().map(|(_, v)| v.clone()).collect();
             if let Some(buf) = splat(&merged, &values, &base) {
                 self.handler.execute(&buf);
+                // Each segment's value came from its own single-segment pool record -- if the
+                // combination as a whole found new coverage, credit all of them (we can't tell
+                // which one mattered, but unlike AFL's stacked havoc, every byte that changed
+                // here came from a pool value we're tracking, not an untracked random tweak).
+                if self.handler.executor.has_new_path {
+                    for (i, (id, _)) in chosen.iter().enumerate() {
+                        report_success(&vec![pattern[i]], *id);
+                    }
+                }
             }
         }
     }
@@ -161,7 +220,9 @@ fn splat(merged: &[TagSeg], values: &[Vec<u8>], base: &[u8]) -> Option<Vec<u8>> 
     Some(buf)
 }
 
-fn matches_original(merged: &[TagSeg], values: &[Vec<u8>], base: &[u8]) -> bool {
+// pub(crate): also used by search/afl.rs's reuse_splat, for the same reason -- no point
+// executing a candidate that's byte-for-byte identical to what's already there.
+pub(crate) fn matches_original(merged: &[TagSeg], values: &[Vec<u8>], base: &[u8]) -> bool {
     merged.iter().zip(values.iter()).all(|(seg, value)| {
         let begin = seg.begin as usize;
         let end = seg.end as usize;

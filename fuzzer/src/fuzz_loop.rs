@@ -50,6 +50,7 @@ pub fn fuzz_loop(
 
         let buf = depot.get_input_buf(id);
         let hints = depot.get_hints(id);
+        let mut cursors = depot.get_cursors(id);
         let (_speed, edge_num, fuzzed_count) = depot.get_entry_info(id);
         let first_time = fuzzed_count == 0;
 
@@ -63,7 +64,7 @@ pub fn fuzz_loop(
             // this ordering is about priority, not starvation -- but there's no reason to
             // burn budget on generic havoc before the targeted attempts get a turn.
             run_op(&mut handler, OpKind::Reusing, |h| {
-                ReusingFuzz::new(h).run(&hints, 50)
+                ReusingFuzz::new(h).run(&hints, &mut cursors, 50)
             });
             run_op(&mut handler, OpKind::Det, |h| DetFuzz::new(h).run(&hints));
             run_op(&mut handler, OpKind::Exploit, |h| {
@@ -81,6 +82,7 @@ pub fn fuzz_loop(
             }
         }
 
+        depot.set_cursors(id, cursors);
         depot.update_entry(id);
     }
 }

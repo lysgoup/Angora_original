@@ -186,6 +186,11 @@ impl<'a, 'b> AFLFuzz<'a, 'b> {
         if record.critical_values.len() != merged.len() {
             return;
         }
+        // Same bytes already sitting there -- not worth a copy (or the execution this havoc
+        // iteration eventually runs would just be repeating a known-uninteresting candidate).
+        if reusing::matches_original(&merged, &record.critical_values, buf) {
+            return;
+        }
         for (seg, value) in merged.iter().zip(record.critical_values.iter()) {
             let begin = seg.begin as usize;
             let end = seg.end as usize;

@@ -7,10 +7,11 @@ mod sync;
 
 use self::depot_dir::DepotDir;
 pub use self::{
-    depot::Depot,
+    depot::{Depot, ReusingCursor},
     file::*,
     label_pattern_tracker::{
-        extract_pattern, get_single_segment_pool, get_stats as get_pattern_stats, sample_records,
+        extract_pattern, get_single_segment_pool, get_stats as get_pattern_stats, next_records,
+        report_success, sample_records,
     },
     sync::*,
 };
