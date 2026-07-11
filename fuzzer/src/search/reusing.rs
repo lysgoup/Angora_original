@@ -19,6 +19,12 @@ impl<'a, 'b> ReusingFuzz<'a, 'b> {
     }
 
     pub fn run(&mut self, hints: &[TaintHint], iterations: usize) {
+        // Roughly: offsets + offsets_opt + combined-offsets + combined-offsets_opt, each up to
+        // `iterations` executions per hint -- must call set_budget (not just rely on whatever
+        // budget/skip state an earlier operator in this round left behind), otherwise this
+        // "main" solver silently does nothing whenever it runs after an operator that already
+        // exhausted its own budget (skip stays true from there).
+        self.handler.set_budget(iterations * hints.len().max(1) * 4);
         for hint in hints {
             if self.handler.is_stopped_or_skip() {
                 break;

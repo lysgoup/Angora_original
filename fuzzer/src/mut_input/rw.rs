@@ -24,12 +24,16 @@ pub fn set_bytes_by_offsets(offsets: &Vec<TagSeg>, bytes: &Vec<u8>, buf: &mut Ve
     }
 }
 
+// `off` comes from arbitrary taint offsets / random havoc byte indices, so it's never
+// guaranteed to be 2/4/8-byte aligned -- read_unaligned/write_unaligned (not a plain
+// reference-cast-and-dereference) are the correct way to access a multi-byte value at a
+// possibly-unaligned address; the naive cast is UB and modern rustc now catches it at runtime.
 pub fn read_val_from_buf(buf: &Vec<u8>, off: usize, size: usize) -> Result<u64, &str> {
     match size {
         1 => Ok(buf[off] as u64),
-        2 => Ok(unsafe { *(&buf[off] as *const u8 as *const u16) as u64 }),
-        4 => Ok(unsafe { *(&buf[off] as *const u8 as *const u32) as u64 }),
-        8 => Ok(unsafe { *(&buf[off] as *const u8 as *const u64) }),
+        2 => Ok(unsafe { (&buf[off] as *const u8 as *const u16).read_unaligned() as u64 }),
+        4 => Ok(unsafe { (&buf[off] as *const u8 as *const u32).read_unaligned() as u64 }),
+        8 => Ok(unsafe { (&buf[off] as *const u8 as *const u64).read_unaligned() }),
         _ => Err("strange arg off and size"),
     }
 }
@@ -37,20 +41,16 @@ pub fn read_val_from_buf(buf: &Vec<u8>, off: usize, size: usize) -> Result<u64, 
 pub fn set_val_in_buf(buf: &mut Vec<u8>, off: usize, size: usize, val: u64) {
     match size {
         1 => {
-            let v = &mut buf[off];
-            *v = val as u8;
+            buf[off] = val as u8;
         },
-        2 => {
-            let v = unsafe { &mut *(&mut buf[off] as *mut u8 as *mut u16) };
-            *v = val as u16;
+        2 => unsafe {
+            (&mut buf[off] as *mut u8 as *mut u16).write_unaligned(val as u16);
         },
-        4 => {
-            let v = unsafe { &mut *(&mut buf[off] as *mut u8 as *mut u32) };
-            *v = val as u32;
+        4 => unsafe {
+            (&mut buf[off] as *mut u8 as *mut u32).write_unaligned(val as u32);
         },
-        8 => {
-            let v = unsafe { &mut *(&mut buf[off] as *mut u8 as *mut u64) };
-            *v = val as u64;
+        8 => unsafe {
+            (&mut buf[off] as *mut u8 as *mut u64).write_unaligned(val as u64);
         },
         _ => {
             panic!("strange arg off and size: {}, {}", off, size);
@@ -88,54 +88,66 @@ pub fn update_val_in_buf(
             }
         },
         2 => {
+            let ptr = &mut buf[off] as *mut u8 as *mut u16;
             if sign {
-                let v = unsafe { &mut *(&mut buf[off] as *mut u8 as *mut i16) };
-                if direction {
-                    *v = v.wrapping_add(delta as i16);
+                let ptr = ptr as *mut i16;
+                let v = unsafe { ptr.read_unaligned() };
+                let v = if direction {
+                    v.wrapping_add(delta as i16)
                 } else {
-                    *v = v.wrapping_sub(delta as i16);
-                }
+                    v.wrapping_sub(delta as i16)
+                };
+                unsafe { ptr.write_unaligned(v) };
             } else {
-                let v = unsafe { &mut *(&mut buf[off] as *mut u8 as *mut u16) };
-                if direction {
-                    *v = v.wrapping_add(delta as u16);
+                let v = unsafe { ptr.read_unaligned() };
+                let v = if direction {
+                    v.wrapping_add(delta as u16)
                 } else {
-                    *v = v.wrapping_sub(delta as u16);
-                }
+                    v.wrapping_sub(delta as u16)
+                };
+                unsafe { ptr.write_unaligned(v) };
             }
         },
         4 => {
+            let ptr = &mut buf[off] as *mut u8 as *mut u32;
             if sign {
-                let v = unsafe { &mut *(&mut buf[off] as *mut u8 as *mut i32) };
-                if direction {
-                    *v = v.wrapping_add(delta as i32);
+                let ptr = ptr as *mut i32;
+                let v = unsafe { ptr.read_unaligned() };
+                let v = if direction {
+                    v.wrapping_add(delta as i32)
                 } else {
-                    *v = v.wrapping_sub(delta as i32);
-                }
+                    v.wrapping_sub(delta as i32)
+                };
+                unsafe { ptr.write_unaligned(v) };
             } else {
-                let v = unsafe { &mut *(&mut buf[off] as *mut u8 as *mut u32) };
-                if direction {
-                    *v = v.wrapping_add(delta as u32);
+                let v = unsafe { ptr.read_unaligned() };
+                let v = if direction {
+                    v.wrapping_add(delta as u32)
                 } else {
-                    *v = v.wrapping_sub(delta as u32);
-                }
+                    v.wrapping_sub(delta as u32)
+                };
+                unsafe { ptr.write_unaligned(v) };
             }
         },
         8 => {
+            let ptr = &mut buf[off] as *mut u8 as *mut u64;
             if sign {
-                let v = unsafe { &mut *(&mut buf[off] as *mut u8 as *mut i64) };
-                if direction {
-                    *v = v.wrapping_add(delta as i64);
+                let ptr = ptr as *mut i64;
+                let v = unsafe { ptr.read_unaligned() };
+                let v = if direction {
+                    v.wrapping_add(delta as i64)
                 } else {
-                    *v = v.wrapping_sub(delta as i64);
-                }
+                    v.wrapping_sub(delta as i64)
+                };
+                unsafe { ptr.write_unaligned(v) };
             } else {
-                let v = unsafe { &mut *(&mut buf[off] as *mut u8 as *mut u64) };
-                if direction {
-                    *v = v.wrapping_add(delta as u64);
+                let v = unsafe { ptr.read_unaligned() };
+                let v = if direction {
+                    v.wrapping_add(delta as u64)
                 } else {
-                    *v = v.wrapping_sub(delta as u64);
-                }
+                    v.wrapping_sub(delta as u64)
+                };
+                unsafe { ptr.write_unaligned(v) };
             }
         },
         _ => {

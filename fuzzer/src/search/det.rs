@@ -15,6 +15,11 @@ impl<'a, 'b> DetFuzz<'a, 'b> {
     }
 
     pub fn run(&mut self, hints: &[TaintHint]) {
+        // Must call set_budget (not just inherit whatever budget/skip state an earlier
+        // operator in this round left behind) -- otherwise this silently does nothing
+        // whenever it runs after an operator that already exhausted its own budget.
+        self.handler
+            .set_budget(config::MAX_SEARCH_EXEC_NUM * hints.len().max(1));
         for hint in hints {
             if self.handler.is_stopped_or_skip() {
                 break;

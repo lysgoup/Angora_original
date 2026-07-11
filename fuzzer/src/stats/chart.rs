@@ -26,6 +26,10 @@ pub struct ChartStats {
     // fuzzer, since reuse is the primary solving mechanism rather than a bolt-on.
     reuse_patterns: Counter,
     reuse_records: Counter,
+
+    // Per-operator breakdown (AFL/Det/Reusing/Exploit/Len/MagicBytes), restoring the
+    // visibility the original per-FuzzType `-- FUZZ --` table gave.
+    op: OpStats,
 }
 
 impl ChartStats {
@@ -44,6 +48,16 @@ impl ChartStats {
         self.num_inputs += local.num_inputs;
         self.num_hangs += local.num_hangs;
         self.num_crashes += local.num_crashes;
+
+        for i in 0..OP_KIND_NUM {
+            let src = *local.op_stats.get(i);
+            let dst = self.op.get_mut(i);
+            dst.time += src.time;
+            dst.num_exec += src.num_exec;
+            dst.num_inputs += src.num_inputs;
+            dst.num_hangs += src.num_hangs;
+            dst.num_crashes += src.num_crashes;
+        }
     }
 
     pub fn sync_from_global(&mut self, depot: &Arc<Depot>, gb: &Arc<GlobalBranches>) {
@@ -112,6 +126,8 @@ impl fmt::Display for ChartStats {
     SPEED  |  PERIOD: {:6}r/s    TIME: {}us,
     FOUND  |    PATH: {},     HANGS: {},   CRASHES: {}
 {}
+{}
+{}
     REUSE  | PATTERNS: {},   RECORDS: {}
 
 "#,
@@ -129,6 +145,8 @@ impl fmt::Display for ChartStats {
             self.num_inputs,
             self.num_hangs,
             self.num_crashes,
+            " -- FUZZ -- ".blue().bold(),
+            self.op,
             " -- REUSE -- ".blue().bold(),
             self.reuse_patterns,
             self.reuse_records,
