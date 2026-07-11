@@ -77,6 +77,14 @@ pub fn fuzz_main(
         panic!();
     }
 
+    // Marker file an external process can watch for to know the dry run is done and fuzzing
+    // proper is about to start (e.g. before syncing its own seeds in).
+    let dryrun_finish_path = depot.dirs.signal_dir.join("dryrun_finish");
+    match fs::File::create(&dryrun_finish_path) {
+        Ok(_) => info!("Created dryrun_finish marker at {:?}", dryrun_finish_path),
+        Err(e) => warn!("Could not create dryrun_finish marker: {:?}", e),
+    }
+
     let (handles, child_count) = init_cpus_and_run_fuzzing_threads(
         bind,
         num_jobs,

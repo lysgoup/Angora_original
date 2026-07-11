@@ -10,6 +10,9 @@ pub struct DepotDir {
     pub hangs_dir: PathBuf,
     pub crashes_dir: PathBuf,
     pub seeds_dir: PathBuf,
+    // Where fuzz_main drops marker files for events other processes might want to watch for
+    // (currently just "dryrun_finish" -- see fuzz_main::fuzz_main), as opposed to depot state.
+    pub signal_dir: PathBuf,
 }
 
 impl DepotDir {
@@ -17,16 +20,19 @@ impl DepotDir {
         let inputs_dir = out_dir.join(defs::INPUTS_DIR);
         let hangs_dir = out_dir.join(defs::HANGS_DIR);
         let crashes_dir = out_dir.join(defs::CRASHES_DIR);
+        let signal_dir = inputs_dir.join(defs::SIGNAL_DIR);
 
         fs::create_dir(&crashes_dir).unwrap();
         fs::create_dir(&hangs_dir).unwrap();
         fs::create_dir(&inputs_dir).unwrap();
+        fs::create_dir(&signal_dir).unwrap();
 
         Self {
             inputs_dir,
             hangs_dir,
             crashes_dir,
             seeds_dir,
+            signal_dir,
         }
     }
 }
