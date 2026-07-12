@@ -34,8 +34,11 @@ impl<'a, 'b> ReusingFuzz<'a, 'b> {
         // `iterations` executions per hint -- must call set_budget (not just rely on whatever
         // budget/skip state an earlier operator in this round left behind), otherwise this
         // "main" solver silently does nothing whenever it runs after an operator that already
-        // exhausted its own budget (skip stays true from there).
-        self.handler.set_budget(iterations * hints.len().max(1) * 4);
+        // exhausted its own budget (skip stays true from there). hints.len() is capped (see
+        // MAX_HINTS_FOR_BUDGET_SCALING) so a target with hundreds/thousands of hints per input
+        // can't blow this round's budget up to the point where AFL never gets a turn.
+        let scale = hints.len().max(1).min(config::MAX_HINTS_FOR_BUDGET_SCALING);
+        self.handler.set_budget(iterations * scale * 4);
         for (i, hint) in hints.iter().enumerate() {
             if self.handler.is_stopped_or_skip() {
                 break;

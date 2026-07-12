@@ -29,6 +29,17 @@ pub const MAX_COND_ORDER: u32 = 16;
 pub const MAX_SEARCH_EXEC_NUM: usize = 376;
 pub const MAX_EXPLOIT_EXEC_NUM: usize = 66;
 pub const BONUS_EXEC_NUM: usize = 66;
+// Det/Reusing/Len/MagicBytes each size their per-round budget as some constant times
+// hints.len() -- fine for small synthetic targets (a handful of hints per input), but on a
+// real-world target a single traced input can carry hundreds or thousands of taint hints,
+// which blows the whole round's budget up to millions of executions. Since these operators
+// run before AFL in the mutation menu (fuzz_loop.rs) and all share one SearchHandler, that
+// starves AFL down to a sliver of the total exec budget and can pin a worker thread on its
+// very first seed for the entire campaign (observed: 12h run, AFL got 12 minutes of it).
+// Capping the hints.len() multiplier at this ceiling keeps a single round bounded regardless
+// of target complexity, so the queue keeps cycling and every operator (including AFL) gets a
+// turn on every seed instead of just the first one.
+pub const MAX_HINTS_FOR_BUDGET_SCALING: usize = 64;
 
 // AFL
 pub const MUTATE_ARITH_MAX: u32 = 30;

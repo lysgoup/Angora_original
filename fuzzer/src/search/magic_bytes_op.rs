@@ -14,7 +14,10 @@ impl<'a, 'b> MagicBytesOp<'a, 'b> {
     }
 
     pub fn run(&mut self, hints: &[TaintHint]) {
-        self.handler.set_budget(hints.len().max(1));
+        // hints.len() is capped (see MAX_HINTS_FOR_BUDGET_SCALING) -- same reasoning as
+        // det.rs/reusing.rs.
+        let scale = hints.len().max(1).min(config::MAX_HINTS_FOR_BUDGET_SCALING);
+        self.handler.set_budget(scale);
         for hint in hints {
             if self.handler.is_stopped_or_skip() {
                 break;

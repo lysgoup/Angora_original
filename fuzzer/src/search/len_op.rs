@@ -17,7 +17,10 @@ impl<'a, 'b> LenOp<'a, 'b> {
         if !config::ENABLE_INPUT_LEN_EXPLORATION {
             return;
         }
-        self.handler.set_budget(16 * hints.len().max(1));
+        // hints.len() is capped (see MAX_HINTS_FOR_BUDGET_SCALING) -- same reasoning as
+        // det.rs/reusing.rs.
+        let scale = hints.len().max(1).min(config::MAX_HINTS_FOR_BUDGET_SCALING);
+        self.handler.set_budget(16 * scale);
         for hint in hints {
             if self.handler.is_stopped_or_skip() {
                 break;

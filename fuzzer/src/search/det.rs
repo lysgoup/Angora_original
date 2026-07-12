@@ -18,8 +18,11 @@ impl<'a, 'b> DetFuzz<'a, 'b> {
         // Must call set_budget (not just inherit whatever budget/skip state an earlier
         // operator in this round left behind) -- otherwise this silently does nothing
         // whenever it runs after an operator that already exhausted its own budget.
-        self.handler
-            .set_budget(config::MAX_SEARCH_EXEC_NUM * hints.len().max(1));
+        // hints.len() is capped (see MAX_HINTS_FOR_BUDGET_SCALING) so a target with hundreds
+        // or thousands of hints per input can't blow this round's budget up to the point
+        // where AFL never gets a turn.
+        let scale = hints.len().max(1).min(config::MAX_HINTS_FOR_BUDGET_SCALING);
+        self.handler.set_budget(config::MAX_SEARCH_EXEC_NUM * scale);
         for hint in hints {
             if self.handler.is_stopped_or_skip() {
                 break;
