@@ -26,6 +26,15 @@ pub struct Executor {
     pub has_new_path: bool,
     pub global_stats: Arc<RwLock<stats::ChartStats>>,
     pub local_stats: stats::LocalStats,
+    // Set for the duration of run_sync (dry run) only. While true, do_if_has_new saves/tracks
+    // every seed unconditionally instead of only ones that add new coverage -- a dry-run seed
+    // that happens to be a coverage subset of an earlier one is still a legitimate part of the
+    // corpus, not noise to discard.
+    pub is_dry_run: bool,
+    pub dryrun_discarded_count: usize,
+    pub dryrun_forkserver_error_count: usize,
+    pub dryrun_track_skipped_speed: usize,
+    pub dryrun_track_skipped_memory: usize,
 }
 
 impl Executor {
@@ -80,6 +89,11 @@ impl Executor {
             has_new_path: false,
             global_stats,
             local_stats: Default::default(),
+            is_dry_run: false,
+            dryrun_discarded_count: 0,
+            dryrun_forkserver_error_count: 0,
+            dryrun_track_skipped_speed: 0,
+            dryrun_track_skipped_memory: 0,
         }
     }
 
@@ -135,7 +149,11 @@ impl Executor {
         // new edge: one byte in bitmap
         let (has_new_path, has_new_edge, edge_num) = self.branches.has_new(status);
 
-        if has_new_path {
+        // During dry run every seed from the seed directory is saved/tracked regardless of
+        // whether it adds new coverage over an earlier seed -- it's still part of the corpus
+        // the user handed us, not noise to discard just because some other seed already hit
+        // the same edges.
+        if has_new_path || self.is_dry_run {
             self.has_new_path = true;
             self.local_stats.find_new(&status);
             let id = self.depot.save(status, &buf);
@@ -152,9 +170,15 @@ impl Executor {
                         "Skip tracking id {}, speed: {}, speed_ratio: {}, has_new_edge: {}",
                         id, speed, speed_ratio, has_new_edge
                     );
+                    if self.is_dry_run {
+                        self.dryrun_track_skipped_speed += 1;
+                    }
                     return;
                 }
                 let crash_or_tmout = self.try_unlimited_memory(buf);
+                if crash_or_tmout && self.is_dry_run {
+                    self.dryrun_track_skipped_memory += 1;
+                }
                 if !crash_or_tmout {
                     let hints = self.track(id, buf);
                     self.depot
@@ -171,10 +195,29 @@ impl Executor {
         self.check_timeout(status)
     }
 
-    pub fn run_sync(&mut self, buf: &Vec<u8>) {
+    // Returns false (without saving/tracking anything) if the forkserver couldn't be revived
+    // after a socket error, even after one rebind-and-retry -- the caller (depot::sync_depot)
+    // counts this so a transient dry-run hiccup is visible instead of silently swallowed.
+    pub fn run_sync(&mut self, buf: &Vec<u8>) -> bool {
+        self.is_dry_run = true;
         self.run_init();
-        let status = self.run_inner(buf);
+        let mut status = self.run_inner(buf);
+
+        if status == StatusType::Error {
+            warn!("Dry run socket error, retrying after rebind");
+            self.rebind_forksrv();
+            self.has_new_path = false;
+            status = self.run_inner(buf);
+            if status == StatusType::Error {
+                warn!("Dry run retry also failed, skipping seed");
+                self.is_dry_run = false;
+                return false;
+            }
+        }
+
         self.do_if_has_new(buf, status, None);
+        self.is_dry_run = false;
+        true
     }
 
     fn run_init(&mut self) {

@@ -13,26 +13,58 @@ use std::{
 
 pub fn sync_depot(executor: &mut Executor, running: Arc<AtomicBool>, dir: &Path) {
     executor.local_stats.clear();
-    let seed_dir = dir.read_dir().expect("read_dir call failed");
-    for entry in seed_dir {
-        if let Ok(entry) = entry {
-            if !running.load(Ordering::SeqCst) {
-                break;
+    // Deterministic processing order -- read_dir()'s order is filesystem-dependent (often
+    // inode order), which makes dry run non-reproducible between runs of the same seed dir.
+    let mut entries: Vec<_> = dir
+        .read_dir()
+        .expect("read_dir call failed")
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().is_file())
+        .collect();
+    entries.sort_by_key(|e| e.file_name());
+    info!("Found {} seed files in {:?}", entries.len(), dir);
+
+    for entry in entries {
+        if !running.load(Ordering::SeqCst) {
+            break;
+        }
+        let path = entry.path();
+        let file_len = fs::metadata(&path)
+            .expect("Could not fetch metadata.")
+            .len() as usize;
+        if file_len < config::MAX_INPUT_LEN {
+            let buf = read_from_file(&path);
+            if !executor.run_sync(&buf) {
+                executor.dryrun_forkserver_error_count += 1;
             }
-            let path = &entry.path();
-            if path.is_file() {
-                let file_len =
-                    fs::metadata(path).expect("Could not fetch metadata.").len() as usize;
-                if file_len < config::MAX_INPUT_LEN {
-                    let buf = read_from_file(path);
-                    executor.run_sync(&buf);
-                } else {
-                    warn!("Seed discarded, too long: {:?}", path);
-                }
-            }
+        } else {
+            warn!(
+                "Seed discarded, too long: {:?} (size={}, MAX_INPUT_LEN={})",
+                entry.file_name(),
+                file_len,
+                config::MAX_INPUT_LEN
+            );
+            executor.dryrun_discarded_count += 1;
         }
     }
-    info!("sync {} file from seeds.", executor.local_stats.num_inputs);
+
+    let num_hangs = executor.local_stats.num_hangs.0;
+    let num_crashes = executor.local_stats.num_crashes.0;
+    info!(
+        "sync {} inputs: {} normal, {} hangs, {} crashes, {} forkserver_errors, {} discarded",
+        executor.local_stats.num_inputs.0 + num_hangs + num_crashes,
+        executor.local_stats.num_inputs.0,
+        num_hangs,
+        num_crashes,
+        executor.dryrun_forkserver_error_count,
+        executor.dryrun_discarded_count,
+    );
+    info!(
+        "dryrun track skipped: {} (speed: {}, memory: {})",
+        executor.dryrun_track_skipped_speed + executor.dryrun_track_skipped_memory,
+        executor.dryrun_track_skipped_speed,
+        executor.dryrun_track_skipped_memory,
+    );
     executor.update_log();
 }
 

@@ -77,6 +77,44 @@ pub fn fuzz_main(
         panic!();
     }
 
+    info!(
+        "Dry-run completed. Total inputs executed: {}",
+        executor.local_stats.num_exec
+    );
+
+    let num_hangs = executor.local_stats.num_hangs.0;
+    let num_crashes = executor.local_stats.num_crashes.0;
+    let num_normal = executor.local_stats.num_inputs.0;
+    let num_total = executor.local_stats.num_exec.0;
+    let track_skipped_speed = executor.dryrun_track_skipped_speed;
+    let track_skipped_memory = executor.dryrun_track_skipped_memory;
+    let dryrun_log_path = angora_out_dir.join("dryrun_log.txt");
+    let dryrun_log_result = (|| -> std::io::Result<()> {
+        let mut f = fs::File::create(&dryrun_log_path)?;
+        writeln!(f, "total_executed: {}", num_total)?;
+        writeln!(f, "normal: {}", num_normal)?;
+        writeln!(f, "hang: {}", num_hangs)?;
+        writeln!(f, "crash: {}", num_crashes)?;
+        writeln!(f, "discarded_too_long: {}", executor.dryrun_discarded_count)?;
+        writeln!(
+            f,
+            "forkserver_error: {}",
+            executor.dryrun_forkserver_error_count
+        )?;
+        writeln!(
+            f,
+            "track_skipped_total: {}",
+            track_skipped_speed + track_skipped_memory
+        )?;
+        writeln!(f, "track_skipped_speed: {}", track_skipped_speed)?;
+        writeln!(f, "track_skipped_memory: {}", track_skipped_memory)?;
+        Ok(())
+    })();
+    match dryrun_log_result {
+        Ok(_) => info!("dryrun_log.txt written to {:?}", dryrun_log_path),
+        Err(e) => warn!("Could not write dryrun_log.txt: {:?}", e),
+    }
+
     // Marker file an external process can watch for to know the dry run is done and fuzzing
     // proper is about to start (e.g. before syncing its own seeds in).
     let dryrun_finish_path = depot.dirs.signal_dir.join("dryrun_finish");
