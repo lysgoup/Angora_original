@@ -2,6 +2,7 @@ use crate::{
     branches::GlobalBranches, command::CommandOpt, depot::Depot, executor::Executor, search::*,
     stats,
 };
+use angora_common::config;
 use stats::OpKind;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -53,6 +54,11 @@ pub fn fuzz_loop(
         let mut cursors = depot.get_cursors(id);
         let (_speed, edge_num, fuzzed_count) = depot.get_entry_info(id);
         let first_time = fuzzed_count == 0;
+        // Which window of hints Det/Reusing/Len/MagicBytes cover this visit (see
+        // search::rotated_hint_indices) -- advances by a full window each time this seed is
+        // fuzzed again, so a hint-rich input eventually gets all its hints covered across
+        // several visits instead of the same prefix forever.
+        let rotation_offset = fuzzed_count * config::MAX_HINTS_FOR_BUDGET_SCALING;
 
         {
             let mut handler = SearchHandler::new(running.clone(), &mut executor, buf);
@@ -64,15 +70,19 @@ pub fn fuzz_loop(
             // this ordering is about priority, not starvation -- but there's no reason to
             // burn budget on generic havoc before the targeted attempts get a turn.
             run_op(&mut handler, OpKind::Reusing, |h| {
-                ReusingFuzz::new(h).run(&hints, &mut cursors, 50)
+                ReusingFuzz::new(h).run(&hints, &mut cursors, 50, rotation_offset)
             });
-            run_op(&mut handler, OpKind::Det, |h| DetFuzz::new(h).run(&hints));
+            run_op(&mut handler, OpKind::Det, |h| {
+                DetFuzz::new(h).run(&hints, rotation_offset)
+            });
             run_op(&mut handler, OpKind::Exploit, |h| {
                 ExploitOp::new(h).run(&hints)
             });
-            run_op(&mut handler, OpKind::Len, |h| LenOp::new(h).run(&hints));
+            run_op(&mut handler, OpKind::Len, |h| {
+                LenOp::new(h).run(&hints, rotation_offset)
+            });
             run_op(&mut handler, OpKind::MagicBytes, |h| {
-                MagicBytesOp::new(h).run(&hints)
+                MagicBytesOp::new(h).run(&hints, rotation_offset)
             });
 
             if enable_afl {

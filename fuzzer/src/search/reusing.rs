@@ -24,11 +24,15 @@ impl<'a, 'b> ReusingFuzz<'a, 'b> {
     // persists across visits to this seed, so the same value is never re-applied to the same
     // hint offsets twice: this is a deterministic sweep through the pool, not a repeated random
     // sample of it.
+    // `rotation_offset` (see search::rotated_hint_indices) picks which window of hints this
+    // visit covers, so a target with more hints than MAX_HINTS_FOR_BUDGET_SCALING still gets
+    // all of them covered across repeated visits instead of only ever the first window.
     pub fn run(
         &mut self,
         hints: &[TaintHint],
         cursors: &mut Vec<ReusingCursor>,
         iterations: usize,
+        rotation_offset: usize,
     ) {
         // Roughly: offsets + offsets_opt + combined-offsets + combined-offsets_opt, each up to
         // `iterations` executions per hint -- must call set_budget (not just rely on whatever
@@ -39,10 +43,11 @@ impl<'a, 'b> ReusingFuzz<'a, 'b> {
         // can't blow this round's budget up to the point where AFL never gets a turn.
         let scale = hints.len().max(1).min(config::MAX_HINTS_FOR_BUDGET_SCALING);
         self.handler.set_budget(iterations * scale * 4);
-        for (i, hint) in hints.iter().enumerate() {
+        for i in rotated_hint_indices(hints.len(), rotation_offset) {
             if self.handler.is_stopped_or_skip() {
                 break;
             }
+            let hint = &hints[i];
             if !hint.is_tainted() {
                 continue;
             }

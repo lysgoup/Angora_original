@@ -13,15 +13,19 @@ impl<'a, 'b> MagicBytesOp<'a, 'b> {
         Self { handler }
     }
 
-    pub fn run(&mut self, hints: &[TaintHint]) {
+    // `rotation_offset` (see search::rotated_hint_indices) picks which window of hints this
+    // visit covers, so a target with more hints than MAX_HINTS_FOR_BUDGET_SCALING still gets
+    // all of them covered across repeated visits instead of only ever the first window.
+    pub fn run(&mut self, hints: &[TaintHint], rotation_offset: usize) {
         // hints.len() is capped (see MAX_HINTS_FOR_BUDGET_SCALING) -- same reasoning as
         // det.rs/reusing.rs.
         let scale = hints.len().max(1).min(config::MAX_HINTS_FOR_BUDGET_SCALING);
         self.handler.set_budget(scale);
-        for hint in hints {
+        for i in rotated_hint_indices(hints.len(), rotation_offset) {
             if self.handler.is_stopped_or_skip() {
                 break;
             }
+            let hint = &hints[i];
             if hint.kind != HintKind::CmpFn || hint.offsets.is_empty() || hint.variables.is_empty()
             {
                 continue;
