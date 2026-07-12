@@ -11,7 +11,7 @@ pub const DISABLE_INFER_SHAPE_IF_HAS_AND_OP: bool = true;
 pub const MAX_INPUT_LEN: usize = 15000;
 
 // branch.rs
-pub const MAP_SIZE_POW2: usize = 20;
+pub const MAP_SIZE_POW2: usize = 23;
 pub const BRANCHES_SIZE: usize = 1 << MAP_SIZE_POW2;
 
 // executor.rs:
