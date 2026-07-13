@@ -271,22 +271,26 @@ pub fn sample_records(
     use rand::Rng;
     let map = label_pattern_map().lock().unwrap();
     let all_records = map.get(pattern)?;
-    let mut candidates: Vec<HintRecord> = all_records
+    // References only -- a pattern bucket can hold thousands of records on a hint-rich
+    // real-world target, and this runs on every reuse-splat pick inside AFL's havoc_flip
+    // (which can fire many times per candidate under stacking), so cloning the whole matching
+    // set up front here was a real, measurable hot-path cost. Only the records actually
+    // selected below get cloned.
+    let mut candidates: Vec<&HintRecord> = all_records
         .iter()
         .filter(|r| r.kind == kind && r.is_eq_like == is_eq_like)
-        .cloned()
         .collect();
     if candidates.is_empty() {
         return None;
     }
     if candidates.len() <= iterations {
-        return Some(candidates);
+        return Some(candidates.into_iter().cloned().collect());
     }
 
     let mut rng = rand::thread_rng();
     let mut selected = Vec::with_capacity(iterations);
     for _ in 0..iterations {
-        let total_weight: f64 = candidates.iter().map(confidence).sum();
+        let total_weight: f64 = candidates.iter().map(|r| confidence(r)).sum();
         let mut r = rng.gen_range(0.0, total_weight);
         let mut pick_idx = candidates.len() - 1;
         for (i, c) in candidates.iter().enumerate() {
@@ -296,7 +300,7 @@ pub fn sample_records(
                 break;
             }
         }
-        selected.push(candidates.remove(pick_idx));
+        selected.push(candidates.remove(pick_idx).clone());
     }
     Some(selected)
 }
