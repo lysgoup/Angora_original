@@ -4,7 +4,7 @@ use angora_common::{cond_stmt_base::CondStmtBase, defs, tag::TagSeg};
 // per-seed mutation menu (fuzz_loop.rs) act on it. Replaces the old FuzzType dispatch; there is
 // no AFL/Other variant here since plain AFL havoc runs on every seed unconditionally rather than
 // being represented as a hint.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HintKind {
     Explore,
     Exploit,

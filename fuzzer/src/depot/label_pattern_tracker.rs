@@ -43,6 +43,19 @@ fn next_record_id() -> u64 {
     NEXT_ID.fetch_add(1, Ordering::Relaxed)
 }
 
+// Everything stored under one LabelPattern key. `records` stays an append-only, insertion-order
+// Vec (next_records' cursor semantics depend on that). `seen` is a side index purely for
+// create_record's dedup check: a plain "does any existing record already have these exact
+// critical_values/kind/is_eq_like" scan is O(records-in-bucket) per insert, and a hot bucket on
+// a real target can hold thousands of records by the time dry run alone is done, making
+// population effectively O(n^2) overall. Hashing the same key instead makes that check O(1)
+// average, independent of how large the bucket has grown.
+#[derive(Default)]
+struct PatternBucket {
+    records: Vec<HintRecord>,
+    seen: HashSet<(HintKind, bool, Vec<Vec<u8>>)>,
+}
+
 // Used only to bias AFL's reuse-splat pick (search/afl.rs via sample_records) towards records
 // more likely to have actually caused the coverage that got them stored -- never to exclude
 // anything. ReusingFuzz's own sweep (next_records) ignores this entirely and stays a plain
@@ -51,8 +64,8 @@ fn confidence(r: &HintRecord) -> f64 {
     1.0 / (1.0 + r.diff_size as f64) + r.success_count as f64
 }
 
-pub fn label_pattern_map() -> &'static Mutex<HashMap<LabelPattern, Vec<HintRecord>>> {
-    static MAP: OnceLock<Mutex<HashMap<LabelPattern, Vec<HintRecord>>>> = OnceLock::new();
+fn label_pattern_map() -> &'static Mutex<HashMap<LabelPattern, PatternBucket>> {
+    static MAP: OnceLock<Mutex<HashMap<LabelPattern, PatternBucket>>> = OnceLock::new();
     MAP.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -92,17 +105,19 @@ fn create_record(
     diff_size: usize,
 ) {
     let mut map = label_pattern_map().lock().unwrap();
+    let bucket = map.entry(pattern.clone()).or_default();
 
-    if let Some(existing) = map.get(pattern) {
-        // A duplicate only counts as such within the same kind/is_eq_like -- otherwise an
-        // Exploit-kind (or `<`/`>`) hint that happens to share bytes with an already-stored
-        // Explore/`==` record would silently never get its own record, and lookups filtering
-        // for that other kind/is_eq_like would never see this value at all.
-        if existing.iter().any(|r| {
-            r.critical_values == *critical_values && r.kind == kind && r.is_eq_like == is_eq_like
-        }) {
-            return;
-        }
+    // A duplicate only counts as such within the same kind/is_eq_like -- otherwise an
+    // Exploit-kind (or `<`/`>`) hint that happens to share bytes with an already-stored
+    // Explore/`==` record would silently never get its own record, and lookups filtering for
+    // that other kind/is_eq_like would never see this value at all. `seen.insert` both checks
+    // and records membership in one O(1)-average hashed lookup, instead of a linear scan over
+    // every record already in this bucket.
+    if !bucket
+        .seen
+        .insert((kind, is_eq_like, critical_values.clone()))
+    {
+        return;
     }
 
     let record = HintRecord {
@@ -115,9 +130,7 @@ fn create_record(
         diff_size,
         success_count: 0,
     };
-    map.entry(pattern.clone())
-        .or_insert_with(Vec::new)
-        .push(record);
+    bucket.records.push(record);
 }
 
 fn add_for_offsets(offsets: &Vec<TagSeg>, hint: &TaintHint, input_buf: &Vec<u8>, diff_size: usize) {
@@ -233,8 +246,8 @@ pub fn add_hints_to_pattern_map(
 // whole confidence signal exists to avoid.
 pub fn report_success(pattern: &LabelPattern, record_id: u64) {
     let mut map = label_pattern_map().lock().unwrap();
-    if let Some(records) = map.get_mut(pattern) {
-        if let Some(r) = records.iter_mut().find(|r| r.id == record_id) {
+    if let Some(bucket) = map.get_mut(pattern) {
+        if let Some(r) = bucket.records.iter_mut().find(|r| r.id == record_id) {
             r.success_count += 1;
         }
     }
@@ -243,7 +256,7 @@ pub fn report_success(pattern: &LabelPattern, record_id: u64) {
 pub fn get_stats() -> (usize, usize) {
     let map = label_pattern_map().lock().unwrap();
     let num_patterns = map.len();
-    let num_records: usize = map.values().map(|v| v.len()).sum();
+    let num_records: usize = map.values().map(|b| b.records.len()).sum();
     (num_patterns, num_records)
 }
 
@@ -270,7 +283,7 @@ pub fn sample_records(
 ) -> Option<Vec<HintRecord>> {
     use rand::Rng;
     let map = label_pattern_map().lock().unwrap();
-    let all_records = map.get(pattern)?;
+    let all_records = &map.get(pattern)?.records;
     // References only -- a pattern bucket can hold thousands of records on a hint-rich
     // real-world target, and this runs on every reuse-splat pick inside AFL's havoc_flip
     // (which can fire many times per candidate under stacking), so cloning the whole matching
@@ -321,7 +334,7 @@ pub fn next_records(
     iterations: usize,
 ) -> Option<Vec<HintRecord>> {
     let map = label_pattern_map().lock().unwrap();
-    let all_records = map.get(pattern)?;
+    let all_records = &map.get(pattern)?.records;
     let matching: Vec<&HintRecord> = all_records
         .iter()
         .filter(|r| r.kind == kind && r.is_eq_like == is_eq_like)
@@ -349,8 +362,9 @@ pub fn get_single_segment_pool(
     let map = label_pattern_map().lock().unwrap();
     let single_pattern = vec![segment_size];
     map.get(&single_pattern)
-        .map(|records| {
-            records
+        .map(|bucket| {
+            bucket
+                .records
                 .iter()
                 .filter(|r| r.kind == kind && r.is_eq_like == is_eq_like)
                 .filter_map(|r| r.critical_values.first().cloned().map(|v| (r.id, v)))
@@ -443,7 +457,7 @@ mod tests {
         report_success(&pattern, target_id);
 
         let map = label_pattern_map().lock().unwrap();
-        let stored = map.get(&pattern).unwrap();
+        let stored = &map.get(&pattern).unwrap().records;
         let target = stored.iter().find(|r| r.id == target_id).unwrap();
         let other = stored.iter().find(|r| r.id == other_id).unwrap();
         assert_eq!(target.success_count, 2);
@@ -474,7 +488,7 @@ mod tests {
 
         let (low_id, high_id) = {
             let map = label_pattern_map().lock().unwrap();
-            let stored = map.get(&pattern).unwrap();
+            let stored = &map.get(&pattern).unwrap().records;
             let low = stored
                 .iter()
                 .find(|r| r.critical_values == vec![vec![1u8]])
@@ -506,5 +520,38 @@ mod tests {
             high_picks
         );
         let _ = low_id;
+    }
+
+    #[test]
+    fn duplicate_inserts_are_still_deduped_via_the_hashset_index() {
+        let pattern = vec![91004u32];
+        // Same (kind, is_eq_like, critical_values) inserted repeatedly -- must collapse to a
+        // single stored record regardless of how the dedup check is implemented internally.
+        for _ in 0..10 {
+            create_record(
+                &pattern,
+                &vec![seg(0, 91004)],
+                &vec![vec![7u8]],
+                1,
+                HintKind::Explore,
+                true,
+                0,
+            );
+        }
+        // A different kind sharing the same bytes must still get its own record (dedup is
+        // scoped to kind/is_eq_like, not critical_values alone).
+        create_record(
+            &pattern,
+            &vec![seg(0, 91004)],
+            &vec![vec![7u8]],
+            1,
+            HintKind::Exploit,
+            true,
+            0,
+        );
+
+        let map = label_pattern_map().lock().unwrap();
+        let stored = &map.get(&pattern).unwrap().records;
+        assert_eq!(stored.len(), 2);
     }
 }
