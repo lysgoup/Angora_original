@@ -63,29 +63,21 @@ pub fn fuzz_loop(
         {
             let mut handler = SearchHandler::new(running.clone(), &mut executor, buf);
 
-            // Cheap and targeted first, generic/expensive havoc last: give the reuse pool
-            // (the main solving mechanism) and the other targeted operators first crack at
-            // the round's budget, and spend AFL's much larger splice+havoc budget on
-            // whatever's left. Each operator carves out its own budget via set_budget, so
-            // this ordering is about priority, not starvation -- but there's no reason to
-            // burn budget on generic havoc before the targeted attempts get a turn.
-            //
-            // Len runs dead last (after AFL, not before) -- in practice it rarely finds new
-            // coverage (its own per-hint logic is a handful of fixed length-extend/truncate
-            // tries, not a search), so it shouldn't get a turn ahead of AFL just because it's
-            // "targeted".
+            // TEMPORARY: Det/Exploit/MagicBytes/Len disabled to isolate Reusing vs. AFL's
+            // exec/time share for a comparison run against Reusing_mut -- re-enable once
+            // that's done.
             run_op(&mut handler, OpKind::Reusing, |h| {
-                ReusingFuzz::new(h).run(&hints, &mut cursors, 50, rotation_offset)
+                ReusingFuzz::new(h).run(&hints, &mut cursors)
             });
-            run_op(&mut handler, OpKind::Det, |h| {
-                DetFuzz::new(h).run(&hints, rotation_offset)
-            });
-            run_op(&mut handler, OpKind::Exploit, |h| {
-                ExploitOp::new(h).run(&hints)
-            });
-            run_op(&mut handler, OpKind::MagicBytes, |h| {
-                MagicBytesOp::new(h).run(&hints, rotation_offset)
-            });
+            // run_op(&mut handler, OpKind::Det, |h| {
+            //     DetFuzz::new(h).run(&hints, rotation_offset)
+            // });
+            // run_op(&mut handler, OpKind::Exploit, |h| {
+            //     ExploitOp::new(h).run(&hints)
+            // });
+            // run_op(&mut handler, OpKind::MagicBytes, |h| {
+            //     MagicBytesOp::new(h).run(&hints, rotation_offset)
+            // });
 
             if enable_afl {
                 run_op(&mut handler, OpKind::Afl, |h| {
@@ -93,9 +85,9 @@ pub fn fuzz_loop(
                 });
             }
 
-            run_op(&mut handler, OpKind::Len, |h| {
-                LenOp::new(h).run(&hints, rotation_offset)
-            });
+            // run_op(&mut handler, OpKind::Len, |h| {
+            //     LenOp::new(h).run(&hints, rotation_offset)
+            // });
         }
 
         depot.set_cursors(id, cursors);
