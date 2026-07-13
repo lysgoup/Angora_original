@@ -102,7 +102,9 @@ impl Depot {
 
     // Called once, right after a freshly-saved Normal input has been tracked: attaches its
     // hints and enters it into the schedule. Also feeds the reuse pool (label_pattern_tracker)
-    // from these hints, since that's the only place critical values get harvested from.
+    // from these hints, since that's the only place critical values get harvested from --
+    // unless `enable_reusing` is false, in which case population is skipped entirely (not just
+    // consumption), so a disabled-reusing run pays none of the pool-maintenance cost either.
     // `parent_buf` is the seed this input was mutated from (None for raw/dry-run/AFL-synced
     // seeds); only hints tied to bytes that actually differ from the parent get cached.
     pub fn set_hints(
@@ -112,8 +114,11 @@ impl Depot {
         speed: u32,
         edge_num: u32,
         parent_buf: Option<&[u8]>,
+        enable_reusing: bool,
     ) {
-        label_pattern_tracker::add_hints_to_pattern_map(&hints, self, id, parent_buf);
+        if enable_reusing {
+            label_pattern_tracker::add_hints_to_pattern_map(&hints, self, id, parent_buf);
+        }
 
         let reusing_cursors = vec![ReusingCursor::default(); hints.len()];
         let entry = QueueEntry {

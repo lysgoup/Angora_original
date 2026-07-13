@@ -27,12 +27,19 @@ pub struct AFLFuzz<'a, 'b> {
     handler: &'b mut SearchHandler<'a>,
     run_ratio: usize,
     // One entry per hint's offsets, and (separately) per hint's offsets_opt when present --
-    // real tainted regions in this seed that the reuse-splat havoc choice can target.
+    // real tainted regions in this seed that the reuse-splat havoc choice can target. Left
+    // empty when reusing is disabled, since nothing will ever consult it then.
     offset_groups: Vec<OffsetGroup>,
+    enable_reusing: bool,
 }
 
 impl<'a, 'b> AFLFuzz<'a, 'b> {
-    pub fn new(handler: &'b mut SearchHandler<'a>, hints: &[TaintHint], edge_num: usize) -> Self {
+    pub fn new(
+        handler: &'b mut SearchHandler<'a>,
+        hints: &[TaintHint],
+        edge_num: usize,
+        enable_reusing: bool,
+    ) -> Self {
         let avg_edge_num = handler.executor.local_stats.avg_edge_num.get() as usize;
         let run_ratio = if edge_num * 3 < avg_edge_num {
             2
@@ -43,21 +50,23 @@ impl<'a, 'b> AFLFuzz<'a, 'b> {
         };
 
         let mut offset_groups = Vec::new();
-        for hint in hints {
-            let is_eq_like = hint.is_eq_like();
-            if !hint.offsets.is_empty() {
-                offset_groups.push(OffsetGroup {
-                    kind: hint.kind,
-                    is_eq_like,
-                    offsets: hint.offsets.clone(),
-                });
-            }
-            if !hint.offsets_opt.is_empty() {
-                offset_groups.push(OffsetGroup {
-                    kind: hint.kind,
-                    is_eq_like,
-                    offsets: hint.offsets_opt.clone(),
-                });
+        if enable_reusing {
+            for hint in hints {
+                let is_eq_like = hint.is_eq_like();
+                if !hint.offsets.is_empty() {
+                    offset_groups.push(OffsetGroup {
+                        kind: hint.kind,
+                        is_eq_like,
+                        offsets: hint.offsets.clone(),
+                    });
+                }
+                if !hint.offsets_opt.is_empty() {
+                    offset_groups.push(OffsetGroup {
+                        kind: hint.kind,
+                        is_eq_like,
+                        offsets: hint.offsets_opt.clone(),
+                    });
+                }
             }
         }
 
@@ -65,6 +74,7 @@ impl<'a, 'b> AFLFuzz<'a, 'b> {
             handler,
             run_ratio,
             offset_groups,
+            enable_reusing,
         }
     }
 
@@ -94,9 +104,15 @@ impl<'a, 'b> AFLFuzz<'a, 'b> {
         } else {
             6
         };
-        // +1: reuse-pool splat slot, always on (the pattern map is just empty early on, so
-        // this is a no-op until the reuse pool has something).
-        let max_choice = base_choice + 1;
+        // +1: reuse-pool splat slot -- present only when reusing is enabled. When enabled but
+        // the pool is still empty (e.g. early in a run) this slot is just a no-op; when
+        // disabled entirely, dropping it from the range means `choice` can never land on it, so
+        // reuse_splat is never called at all.
+        let max_choice = if self.enable_reusing {
+            base_choice + 1
+        } else {
+            base_choice
+        };
         let choice_range = Uniform::new(0, max_choice);
 
         self.handler.max_times += (config::MAX_HAVOC_FLIP_TIMES * self.run_ratio).into();

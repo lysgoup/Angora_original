@@ -36,6 +36,7 @@ pub fn fuzz_loop(
     global_stats: Arc<RwLock<stats::ChartStats>>,
 ) {
     let enable_afl = cmd_opt.enable_afl;
+    let enable_reusing = cmd_opt.enable_reusing;
     let mut executor = Executor::new(
         cmd_opt,
         global_branches,
@@ -66,9 +67,11 @@ pub fn fuzz_loop(
             // TEMPORARY: Det/Exploit/MagicBytes/Len disabled to isolate Reusing vs. AFL's
             // exec/time share for a comparison run against Reusing_mut -- re-enable once
             // that's done.
-            run_op(&mut handler, OpKind::Reusing, |h| {
-                ReusingFuzz::new(h).run(&hints, &mut cursors)
-            });
+            if enable_reusing {
+                run_op(&mut handler, OpKind::Reusing, |h| {
+                    ReusingFuzz::new(h).run(&hints, &mut cursors)
+                });
+            }
             // run_op(&mut handler, OpKind::Det, |h| {
             //     DetFuzz::new(h).run(&hints, rotation_offset)
             // });
@@ -81,7 +84,7 @@ pub fn fuzz_loop(
 
             if enable_afl {
                 run_op(&mut handler, OpKind::Afl, |h| {
-                    AFLFuzz::new(h, &hints, edge_num as usize).run(first_time)
+                    AFLFuzz::new(h, &hints, edge_num as usize, enable_reusing).run(first_time)
                 });
             }
 

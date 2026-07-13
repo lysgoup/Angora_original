@@ -181,8 +181,14 @@ impl Executor {
                 }
                 if !crash_or_tmout {
                     let hints = self.track(id, buf);
-                    self.depot
-                        .set_hints(id, hints, speed, edge_num as u32, parent);
+                    self.depot.set_hints(
+                        id,
+                        hints,
+                        speed,
+                        edge_num as u32,
+                        parent,
+                        self.cmd.enable_reusing,
+                    );
                 }
             }
         }
