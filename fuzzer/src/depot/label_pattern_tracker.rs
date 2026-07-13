@@ -9,7 +9,7 @@ use crate::mut_input::offsets::{merge_continuous_segments, merge_offsets};
 use angora_common::tag::TagSeg;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 pub type LabelPattern = Vec<u32>;
 
@@ -24,7 +24,13 @@ pub struct HintRecord {
     pub offsets: Vec<TagSeg>,
     pub kind: HintKind,
     pub is_eq_like: bool,
-    pub critical_values: Vec<Vec<u8>>,
+    // Arc, not a bare Vec<Vec<u8>>, so create_record can share one allocation between this
+    // field and PatternBucket::seen's dedup key instead of deep-cloning the bytes twice for
+    // every insert (see create_record) -- cloning an Arc is just a refcount bump. Callers read
+    // through it exactly like a plain Vec<Vec<u8>> via Deref (slicing, iteration, `==`, etc.);
+    // only the rare direct-equality-with-a-literal spots (a couple of tests) need an explicit
+    // deref.
+    pub critical_values: Arc<Vec<Vec<u8>>>,
     // How many bytes differed from the parent input when this value was captured -- a cheap
     // proxy for how many independent things changed at once (AFL's stacked havoc can flip up
     // to 256 bytes in one candidate, while Det/Reusing/MagicBytes/LenOp change exactly one
@@ -53,7 +59,7 @@ fn next_record_id() -> u64 {
 #[derive(Default)]
 struct PatternBucket {
     records: Vec<HintRecord>,
-    seen: HashSet<(HintKind, bool, Vec<Vec<u8>>)>,
+    seen: HashSet<(HintKind, bool, Arc<Vec<Vec<u8>>>)>,
 }
 
 // Used only to bias AFL's reuse-splat pick (search/afl.rs via sample_records) towards records
@@ -107,16 +113,18 @@ fn create_record(
     let mut map = label_pattern_map().lock().unwrap();
     let bucket = map.entry(pattern.clone()).or_default();
 
+    // One deep clone of the bytes here, shared (via cheap Arc refcount bumps) between the
+    // `seen` dedup key and the record itself below -- previously this cloned the same bytes
+    // twice per insert.
+    let values = Arc::new(critical_values.clone());
+
     // A duplicate only counts as such within the same kind/is_eq_like -- otherwise an
     // Exploit-kind (or `<`/`>`) hint that happens to share bytes with an already-stored
     // Explore/`==` record would silently never get its own record, and lookups filtering for
     // that other kind/is_eq_like would never see this value at all. `seen.insert` both checks
     // and records membership in one O(1)-average hashed lookup, instead of a linear scan over
     // every record already in this bucket.
-    if !bucket
-        .seen
-        .insert((kind, is_eq_like, critical_values.clone()))
-    {
+    if !bucket.seen.insert((kind, is_eq_like, values.clone())) {
         return;
     }
 
@@ -126,7 +134,7 @@ fn create_record(
         offsets: offsets.clone(),
         kind,
         is_eq_like,
-        critical_values: critical_values.clone(),
+        critical_values: values,
         diff_size,
         success_count: 0,
     };
@@ -419,10 +427,10 @@ mod tests {
         let mut cursor = 0usize;
         let first =
             next_records(&pattern, HintKind::Explore, true, &mut cursor, 1).expect("first record");
-        assert_eq!(first[0].critical_values, vec![vec![1u8]]);
+        assert_eq!(*first[0].critical_values, vec![vec![1u8]]);
         let second =
             next_records(&pattern, HintKind::Explore, true, &mut cursor, 1).expect("second record");
-        assert_eq!(second[0].critical_values, vec![vec![2u8]]);
+        assert_eq!(*second[0].critical_values, vec![vec![2u8]]);
         assert!(next_records(&pattern, HintKind::Explore, true, &mut cursor, 1).is_none());
     }
 
@@ -491,12 +499,12 @@ mod tests {
             let stored = &map.get(&pattern).unwrap().records;
             let low = stored
                 .iter()
-                .find(|r| r.critical_values == vec![vec![1u8]])
+                .find(|r| *r.critical_values == vec![vec![1u8]])
                 .unwrap()
                 .id;
             let high = stored
                 .iter()
-                .find(|r| r.critical_values == vec![vec![2u8]])
+                .find(|r| *r.critical_values == vec![vec![2u8]])
                 .unwrap()
                 .id;
             (low, high)
